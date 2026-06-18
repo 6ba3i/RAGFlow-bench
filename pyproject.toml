@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ragflow-bench"
+version = "0.1.0"
+description = "Standalone CLI benchmark harness for evaluating RAGFlow over raw HTTP APIs"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "Apache-2.0"}
+authors = [{name = "OpenAI Codex"}]
+dependencies = [
+  "requests>=2.32.0",
+  "pydantic>=2.7.0",
+  "pyyaml>=6.0.0",
+  "rich>=13.7.0",
+  "typer>=0.12.3",
+  "datasets>=2.20.0",
+  "pandas>=2.2.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.2.0"]
+
+[project.scripts]
+ragflow-bench = "ragflow_bench.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,3 @@
+from __future__ import annotations
+
+from ragflow_bench.benchmarks.enterprise_rag_bench import EnterpriseRAGBenchAdapter as CustomBenchmarkAdapter

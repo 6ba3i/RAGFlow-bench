@@ -1,0 +1,30 @@
+benchmark:
+  kind: frames
+  mode: smoke
+  question_limit: 25
+  frames:
+    split: test
+    mapping_path: ./frames_mapping.json
+    local_corpus_dir: ./frames_corpus
+ragflow:
+  base_url: http://127.0.0.1:80
+  api_key_env_var: RAGFLOW_API_KEY
+  llm_id_env_var: RAGFLOW_LLM_ID
+dataset:
+  strategy: reuse_existing_dataset
+  dataset_id: replace-with-existing-dataset-id
+retrieval:
+  top_k: 128
+  page_size: 20
+  similarity_threshold: 0.05
+  vector_similarity_weight: 0.3
+chat:
+  top_n: 8
+  temperature: 0.0
+  top_p: 0.1
+  max_tokens: 128
+  fresh_session_per_question: true
+  quote: true
+  refine_multiturn: false
+output:
+  output_dir: outputs/frames_smoke_example
