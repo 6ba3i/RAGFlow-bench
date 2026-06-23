@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any, Literal
 
 import pandas as pd
 from huggingface_hub import hf_hub_download
 
+from ragflow_bench.logging_utils import ProgressCallback, emit_progress
 from ragflow_bench.reports.writers import write_json, write_jsonl
 
 ERAGB_DATASET_ID = "onyx-dot-app/EnterpriseRAG-Bench"
@@ -31,7 +33,10 @@ def prepare_eragb_artifacts(
     merge_max_docs: int = 100,
     filter_questions_with_missing_docs: bool = False,
     reference_granularity: ReferenceGranularity | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> dict[str, Any]:
+    started = time.monotonic()
+    emit_progress(progress_callback, {"command": "prepare-eragb", "step": "start", "status": "start", "output_dir": str(output_dir)})
     if split != "test":
         raise ValueError("EnterpriseRAG-Bench currently exposes only the 'test' split")
     reference_granularity = reference_granularity or ("shard" if merge_documents else "document")
@@ -53,27 +58,34 @@ def prepare_eragb_artifacts(
     corpus_dir.mkdir(parents=True, exist_ok=True)
 
     token = os.getenv(hf_token_env_var) if hf_token_env_var else None
+    emit_progress(progress_callback, {"command": "prepare-eragb", "step": "download_documents", "status": "start", "path": DOCUMENTS_REPO_PATH})
     documents_parquet = _download_hf_file(
         repo_path=DOCUMENTS_REPO_PATH,
         local_dir=documents_raw_dir,
         refresh=refresh,
         token=token,
     )
+    emit_progress(progress_callback, {"command": "prepare-eragb", "step": "download_documents", "status": "ok", "path": str(documents_parquet)})
+    emit_progress(progress_callback, {"command": "prepare-eragb", "step": "download_questions", "status": "start", "path": QUESTIONS_REPO_PATH})
     questions_parquet = _download_hf_file(
         repo_path=QUESTIONS_REPO_PATH,
         local_dir=questions_raw_dir,
         refresh=refresh,
         token=token,
     )
+    emit_progress(progress_callback, {"command": "prepare-eragb", "step": "download_questions", "status": "ok", "path": str(questions_parquet)})
 
+    emit_progress(progress_callback, {"command": "prepare-eragb", "step": "read_parquet", "status": "start"})
     documents_df = pd.read_parquet(documents_parquet)
     questions_df = pd.read_parquet(questions_parquet)
     if document_limit is not None:
         documents_df = documents_df.head(max(0, document_limit))
     if question_limit is not None:
         questions_df = questions_df.head(max(0, question_limit))
+    emit_progress(progress_callback, {"command": "prepare-eragb", "step": "read_parquet", "status": "ok", "count": int(len(documents_df)), "total": int(len(questions_df))})
 
     if merge_documents:
+        emit_progress(progress_callback, {"command": "prepare-eragb", "step": "write_corpus", "status": "start", "count": int(len(documents_df))})
         corpus = _write_merged_document_corpus(
             documents_df,
             corpus_dir,
@@ -81,8 +93,11 @@ def prepare_eragb_artifacts(
             merge_max_docs=merge_max_docs,
         )
     else:
+        emit_progress(progress_callback, {"command": "prepare-eragb", "step": "write_corpus", "status": "start", "count": int(len(documents_df))})
         corpus = _write_document_corpus(documents_df, corpus_dir)
+    emit_progress(progress_callback, {"command": "prepare-eragb", "step": "write_corpus", "status": "ok", "count": len(corpus["manifest"])})
 
+    emit_progress(progress_callback, {"command": "prepare-eragb", "step": "normalize_questions", "status": "start", "count": int(len(questions_df))})
     normalized_questions, dropped_missing = _normalize_questions(
         questions_df,
         prepared_doc_ids=corpus["prepared_doc_ids"],
@@ -90,6 +105,7 @@ def prepare_eragb_artifacts(
         reference_granularity=reference_granularity,
         filter_questions_with_missing_docs=filter_questions_with_missing_docs,
     )
+    emit_progress(progress_callback, {"command": "prepare-eragb", "step": "normalize_questions", "status": "ok", "count": len(normalized_questions), "failure_count": dropped_missing})
 
     manifest_path = target_dir / "documents_manifest.json"
     questions_path = target_dir / "questions.jsonl"
@@ -99,7 +115,9 @@ def prepare_eragb_artifacts(
     parser_config_path = target_dir / "parser_config.merged.yaml"
 
     write_json(manifest_path, corpus["manifest"])
+    emit_progress(progress_callback, {"command": "prepare-eragb", "step": "manifest_write", "status": "ok", "path": str(manifest_path), "count": len(corpus["manifest"])})
     write_jsonl(questions_path, normalized_questions)
+    emit_progress(progress_callback, {"command": "prepare-eragb", "step": "questions_write", "status": "ok", "path": str(questions_path), "count": len(normalized_questions)})
     if merge_documents:
         write_json(doc_id_to_shard_path, corpus["doc_id_to_shard"])
         write_json(shard_manifest_path, corpus["shard_manifest"])
@@ -139,6 +157,8 @@ def prepare_eragb_artifacts(
         report["shard_manifest_path"] = str(shard_manifest_path)
         report["parser_config_path"] = str(parser_config_path)
     write_json(report_path, report)
+    emit_progress(progress_callback, {"command": "prepare-eragb", "step": "report_write", "status": "ok", "path": str(report_path)})
+    emit_progress(progress_callback, {"command": "prepare-eragb", "step": "complete", "status": "ok", "count": len(corpus["manifest"]), "total": len(normalized_questions), "elapsed_seconds": time.monotonic() - started})
     return report
 
 

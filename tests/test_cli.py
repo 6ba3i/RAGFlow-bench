@@ -104,7 +104,7 @@ def test_retrieve_ingests_when_strategy_is_create_and_ingest(tmp_path, monkeypat
     def fake_client_factory(connection):
         return client
 
-    def fake_ingest_documents(cfg, client_obj, adapter, output_dir):
+    def fake_ingest_documents(cfg, client_obj, adapter, output_dir, progress_callback=None):
         ingest_calls.append({"output_dir": output_dir, "client": client_obj, "adapter": adapter})
         return _FakeRegistry("ingested-ds")
 
@@ -281,7 +281,7 @@ def test_retry_failed_reruns_failed_ids_and_merges_in_place(tmp_path, monkeypatc
     run_dir = _write_run_dir(tmp_path)
     observed = {}
 
-    def fake_run_benchmark(cfg, client, question_ids=None):
+    def fake_run_benchmark(cfg, client, question_ids=None, progress_callback=None):
         observed["output_dir"] = cfg.output.output_dir
         observed["api_key"] = cfg.ragflow.api_key
         observed["question_ids"] = question_ids

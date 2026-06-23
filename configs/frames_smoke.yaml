@@ -1,7 +1,7 @@
 benchmark:
   kind: frames
   mode: smoke
-  question_limit: 25
+  question_limit: 100
   frames:
     split: test
     mapping_path: data/frames-smoke/frames_mapping.json

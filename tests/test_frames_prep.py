@@ -6,6 +6,7 @@ from ragflow_bench.benchmarks.frames_prep import (
     extract_wikipedia_urls,
     page_title_from_url,
     prepare_frames_artifacts,
+    split_wikipedia_urls,
 )
 
 
@@ -55,6 +56,25 @@ def test_extract_wikipedia_urls_from_frames_row():
     ]
 
 
+def test_extract_wikipedia_urls_splits_overflow_cell():
+    row = {
+        "wikipedia_link_1": "https://en.wikipedia.org/wiki/A",
+        "wikipedia_link_11+": "https://en.wikipedia.org/wiki/B, https://en.wikipedia.org/wiki/C_(film), ",
+    }
+
+    assert extract_wikipedia_urls(row) == [
+        "https://en.wikipedia.org/wiki/A",
+        "https://en.wikipedia.org/wiki/B",
+        "https://en.wikipedia.org/wiki/C_(film)",
+    ]
+
+
+def test_split_wikipedia_urls_drops_annotations():
+    assert split_wikipedia_urls("https://en.wikipedia.org/wiki/Pok%C3%A9mon (NOT REQUIRED)") == [
+        "https://en.wikipedia.org/wiki/Pok%C3%A9mon"
+    ]
+
+
 def test_extract_reasoning_types_splits_pipe_values():
     row = {"reasoning_types": "Numerical reasoning | Tabular reasoning | Multiple constraints"}
 
@@ -67,6 +87,9 @@ def test_extract_reasoning_types_splits_pipe_values():
 
 def test_page_title_and_filename_normalization():
     assert page_title_from_url("https://en.wikipedia.org/wiki/Charlotte_Bront%C3%AB") == "Charlotte Brontë"
+    assert page_title_from_url("https://en.wikipedia.org/w/index.php?search=Polytrichum+piliferum&title=Special:Search") == "Polytrichum piliferum"
+    assert page_title_from_url("https://en.wikipedia.org/w/index.php?title=Bronco&redirect=no") == "Bronco"
+    assert page_title_from_url("https://en.wikipedia.org/wiki/2021_French_Open_%E2%80%93_Men%2527s_singles") == "2021 French Open – Men's singles"
     assert build_page_filename("Charlotte Brontë", "123") == "Charlotte_Bront_123.txt"
 
 

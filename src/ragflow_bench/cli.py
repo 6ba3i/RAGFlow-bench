@@ -14,8 +14,8 @@ from ragflow_bench.config import AppConfig, DatasetStrategy, JudgeSettings, Ragf
 from ragflow_bench.benchmarks import prepare_eragb_artifacts, prepare_frames_artifacts
 from ragflow_bench.execution.benchmark_runner import make_adapter, run_benchmark
 from ragflow_bench.ingestion.ingest import ingest_documents, resolve_dataset_id
-from ragflow_bench.judge import ZhipuJudgeClient, default_progress_printer, is_excluded_infra_error, judge_results_file
-from ragflow_bench.logging_utils import configure_logging
+from ragflow_bench.judge import ZhipuJudgeClient, default_progress_printer as judge_progress_printer, is_excluded_infra_error, judge_results_file
+from ragflow_bench.logging_utils import configure_logging, default_progress_printer, emit_progress
 from ragflow_bench.ragflow import RagflowClient
 from ragflow_bench.ragflow.errors import RagflowAPIError, RagflowConfigError
 from ragflow_bench.reports.summary import build_summary
@@ -105,13 +105,16 @@ def main_callback(verbose: bool = typer.Option(False, "--verbose", help="Enable 
 
 @app.command()
 def wizard() -> None:
+    emit_progress(default_progress_printer, {"command": "wizard", "step": "start", "status": "start"})
     target, should_run = run_wizard()
+    emit_progress(default_progress_printer, {"command": "wizard", "step": "config_write", "status": "ok", "path": str(target)})
     console.print(f"Saved wizard config to {target}")
     if should_run:
         cfg = load_config(target)
         _exit_if_local_paths_missing(cfg)
-        output_dir = run_benchmark(cfg, RagflowClient(cfg.ragflow))
+        output_dir = run_benchmark(cfg, RagflowClient(cfg.ragflow), progress_callback=default_progress_printer)
         console.print(f"Run completed: {output_dir}")
+    emit_progress(default_progress_printer, {"command": "wizard", "step": "complete", "status": "ok", "path": str(target)})
 
 
 @app.command("prepare-frames")
@@ -126,6 +129,7 @@ def prepare_frames(
         question_limit=question_limit,
         output_dir=output_dir,
         refresh=refresh,
+        progress_callback=default_progress_printer,
     )
     table = Table(title="ragflow-bench prepare-frames")
     table.add_column("artifact")
@@ -168,6 +172,7 @@ def prepare_eragb(
         merge_max_docs=merge_max_docs,
         filter_questions_with_missing_docs=filter_questions_with_missing_docs,
         reference_granularity=reference_granularity,
+        progress_callback=default_progress_printer,
     )
     table = Table(title="ragflow-bench prepare-eragb")
     table.add_column("artifact")
@@ -186,9 +191,11 @@ def prepare_eragb(
 
 @app.command()
 def doctor(config: str | None = typer.Option(None, help="Optional config path for local corpus checks")) -> None:
+    emit_progress(default_progress_printer, {"command": "doctor", "step": "start", "status": "start", "path": config})
     issues: list[str] = []
     payload: dict[str, object] = {}
     cfg = load_config(config) if config else None
+    emit_progress(default_progress_printer, {"command": "doctor", "step": "config_load", "status": "ok" if cfg else "skipped", "path": config})
     client = RagflowClient(cfg.ragflow if cfg else RagflowConnectionConfig())
     requested_embedding_model = (
         cfg.dataset.embedding_model
@@ -196,19 +203,26 @@ def doctor(config: str | None = typer.Option(None, help="Optional config path fo
         else None
     )
     try:
+        emit_progress(default_progress_printer, {"command": "doctor", "step": "health_check", "status": "start"})
         payload["healthz"] = client.health_check()
+        emit_progress(default_progress_printer, {"command": "doctor", "step": "health_check", "status": "ok"})
     except Exception as exc:  # noqa: BLE001
+        emit_progress(default_progress_printer, {"command": "doctor", "step": "health_check", "status": "error", "exception": exc.__class__.__name__, "error": str(exc)})
         console.print(f"[red]Health check failed:[/red] {exc}")
         raise typer.Exit(code=1)
     api_key_ok = False
     dataset_id = None
     try:
+        emit_progress(default_progress_printer, {"command": "doctor", "step": "system_status", "status": "start"})
         status = client.system_status()
         payload["system_status"] = status
         api_key_ok = True
+        emit_progress(default_progress_printer, {"command": "doctor", "step": "system_status", "status": "ok"})
     except RagflowConfigError as exc:
+        emit_progress(default_progress_printer, {"command": "doctor", "step": "system_status", "status": "error", "exception": exc.__class__.__name__, "error": str(exc)})
         issues.append(str(exc))
     except RagflowAPIError as exc:
+        emit_progress(default_progress_printer, {"command": "doctor", "step": "system_status", "status": "error", "exception": exc.__class__.__name__, "error": str(exc)})
         issues.append(f"Authenticated status probe failed: {exc}")
     if cfg:
         payload["doctor_config"] = {
@@ -221,16 +235,21 @@ def doctor(config: str | None = typer.Option(None, help="Optional config path fo
             )
     if api_key_ok:
         try:
+            emit_progress(default_progress_printer, {"command": "doctor", "step": "models", "status": "start"})
             models = client.list_models()
             payload["models_count"] = len(models)
+            emit_progress(default_progress_printer, {"command": "doctor", "step": "models", "status": "ok", "count": len(models)})
         except Exception as exc:  # noqa: BLE001
+            emit_progress(default_progress_printer, {"command": "doctor", "step": "models", "status": "error", "exception": exc.__class__.__name__, "error": str(exc)})
             issues.append(f"Model listing failed: {exc}")
         try:
+            emit_progress(default_progress_printer, {"command": "doctor", "step": "dataset_create", "status": "start"})
             dataset = client.create_dataset(
                 name="ragflow-bench-doctor",
                 embedding_model=requested_embedding_model,
             )
             dataset_id = dataset.get("id")
+            emit_progress(default_progress_printer, {"command": "doctor", "step": "dataset_create", "status": "ok", "dataset_id": dataset_id})
             payload["dataset_create"] = {
                 "id": dataset_id,
                 "requested_embedding_model": requested_embedding_model,
@@ -239,24 +258,36 @@ def doctor(config: str | None = typer.Option(None, help="Optional config path fo
             probe_file = Path(".omx") / "doctor-probe.txt"
             probe_file.parent.mkdir(exist_ok=True)
             probe_file.write_text("ragflow bench doctor probe", encoding="utf-8")
+            emit_progress(default_progress_printer, {"command": "doctor", "step": "upload", "status": "start", "dataset_id": dataset_id, "path": str(probe_file)})
             uploaded = client.upload_document(dataset_id, probe_file)
             payload["upload_count"] = len(uploaded)
+            emit_progress(default_progress_printer, {"command": "doctor", "step": "upload", "status": "ok", "dataset_id": dataset_id, "count": len(uploaded)})
             doc_ids = [item["id"] for item in uploaded]
             if doc_ids:
+                emit_progress(default_progress_printer, {"command": "doctor", "step": "parse_start", "status": "start", "dataset_id": dataset_id, "count": len(doc_ids)})
                 client.start_parse(dataset_id, doc_ids)
+                emit_progress(default_progress_printer, {"command": "doctor", "step": "parse_start", "status": "ok", "dataset_id": dataset_id, "count": len(doc_ids)})
+                emit_progress(default_progress_printer, {"command": "doctor", "step": "parse_wait", "status": "start", "dataset_id": dataset_id, "count": len(doc_ids)})
                 docs = client.wait_for_documents_parsed(dataset_id, doc_ids, timeout=120)
                 payload["parsed_docs"] = len(docs)
+                emit_progress(default_progress_printer, {"command": "doctor", "step": "parse_wait", "status": "ok", "dataset_id": dataset_id, "count": len(docs)})
+                emit_progress(default_progress_printer, {"command": "doctor", "step": "retrieval", "status": "start", "dataset_id": dataset_id})
                 retrieval = client.retrieve(question="What is this document about?", dataset_ids=[dataset_id])
                 payload["retrieval_total"] = retrieval.get("total")
+                emit_progress(default_progress_printer, {"command": "doctor", "step": "retrieval", "status": "ok", "dataset_id": dataset_id, "count": retrieval.get("total")})
             llm_id = cfg.ragflow.resolved_llm_id() if cfg else None
             if llm_id:
+                emit_progress(default_progress_printer, {"command": "doctor", "step": "chat", "status": "start", "dataset_id": dataset_id})
                 chat = client.create_chat(name="ragflow-bench-doctor", dataset_ids=[dataset_id], llm_id=llm_id)
                 session = client.create_session(chat["id"], name="doctor")
                 answer = client.ask_chat(question="Summarize the probe document.", chat_id=chat["id"], session_id=session.get("id") or session.get("session_id"), llm_id=llm_id)
                 payload["chat_answer_keys"] = sorted(answer.keys()) if isinstance(answer, dict) else []
+                emit_progress(default_progress_printer, {"command": "doctor", "step": "chat", "status": "ok", "dataset_id": dataset_id, "chat_id": chat.get("id"), "session_id": session.get("id") or session.get("session_id")})
             else:
+                emit_progress(default_progress_printer, {"command": "doctor", "step": "chat", "status": "skipped", "dataset_id": dataset_id})
                 issues.append("RAGFLOW_LLM_ID not set; skipped chat creation/completion probe")
         except Exception as exc:  # noqa: BLE001
+            emit_progress(default_progress_printer, {"command": "doctor", "step": "workflow_probe", "status": "error", "dataset_id": dataset_id, "exception": exc.__class__.__name__, "error": str(exc)})
             issues.append(f"Doctor workflow probe failed: {exc}")
             if dataset_id:
                 try:
@@ -282,34 +313,40 @@ def doctor(config: str | None = typer.Option(None, help="Optional config path fo
     console.print(table)
     if payload:
         console.print_json(json.dumps(payload, ensure_ascii=False))
+    emit_progress(default_progress_printer, {"command": "doctor", "step": "complete", "status": "ok" if not issues else "issues", "count": len(issues)})
 
 
 @app.command()
 def ingest(config: str = typer.Option(..., help="Config YAML path")) -> None:
+    emit_progress(default_progress_printer, {"command": "ingest", "step": "config_load", "status": "start", "path": config})
     cfg = load_config(config)
+    emit_progress(default_progress_printer, {"command": "ingest", "step": "config_load", "status": "ok", "path": config})
     _exit_if_local_paths_missing(cfg)
     client = RagflowClient(cfg.ragflow)
     adapter = make_adapter(cfg)
     output_dir = cfg.resolved_output_dir()
     output_dir.mkdir(parents=True, exist_ok=True)
-    registry = ingest_documents(cfg, client, adapter, output_dir)
+    registry = ingest_documents(cfg, client, adapter, output_dir, progress_callback=default_progress_printer)
     console.print_json(json.dumps(registry.to_dict(), ensure_ascii=False))
 
 
 @app.command()
 def retrieve(config: str = typer.Option(..., help="Config YAML path")) -> None:
+    emit_progress(default_progress_printer, {"command": "retrieve", "step": "config_load", "status": "start", "path": config})
     cfg = load_config(config)
+    emit_progress(default_progress_printer, {"command": "retrieve", "step": "config_load", "status": "ok", "path": config})
     _exit_if_local_paths_missing(cfg)
     client = RagflowClient(cfg.ragflow)
     adapter = make_adapter(cfg)
     if cfg.dataset.strategy == DatasetStrategy.CREATE_AND_INGEST:
         output_dir = cfg.resolved_output_dir()
         output_dir.mkdir(parents=True, exist_ok=True)
-        registry = ingest_documents(cfg, client, adapter, output_dir)
+        registry = ingest_documents(cfg, client, adapter, output_dir, progress_callback=default_progress_printer)
         dataset_id = registry.dataset_id
     else:
-        dataset_id = resolve_dataset_id(cfg, client, adapter)
+        dataset_id = resolve_dataset_id(cfg, client, adapter, progress_callback=default_progress_printer)
     question = adapter.load_questions()[0]
+    emit_progress(default_progress_printer, {"command": "retrieve", "step": "retrieval", "status": "start", "question_id": getattr(question, "id", None), "dataset_id": dataset_id})
     payload = client.retrieve(
         question=question.question,
         dataset_ids=[dataset_id],
@@ -318,19 +355,23 @@ def retrieve(config: str = typer.Option(..., help="Config YAML path")) -> None:
         vector_similarity_weight=cfg.retrieval.vector_similarity_weight,
         top_k=cfg.retrieval.top_k,
     )
+    emit_progress(default_progress_printer, {"command": "retrieve", "step": "retrieval", "status": "ok", "question_id": getattr(question, "id", None), "dataset_id": dataset_id, "count": payload.get("total") if isinstance(payload, dict) else None})
     console.print_json(json.dumps(payload, ensure_ascii=False))
 
 
 @app.command()
 def run(config: str = typer.Option(..., help="Config YAML path")) -> None:
+    emit_progress(default_progress_printer, {"command": "run", "step": "config_load", "status": "start", "path": config})
     cfg = load_config(config)
+    emit_progress(default_progress_printer, {"command": "run", "step": "config_load", "status": "ok", "path": config})
     _exit_if_local_paths_missing(cfg)
-    output_dir = run_benchmark(cfg, RagflowClient(cfg.ragflow))
+    output_dir = run_benchmark(cfg, RagflowClient(cfg.ragflow), progress_callback=default_progress_printer)
     console.print(f"Run completed: {output_dir}")
 
 
 @app.command("retry-failed")
 def retry_failed(run_dir: str = typer.Option(..., help="Existing run directory containing results.jsonl and config.resolved.yaml")) -> None:
+    emit_progress(default_progress_printer, {"command": "retry-failed", "step": "start", "status": "start", "path": run_dir})
     run_path = Path(run_dir)
     results_path = run_path / "results.jsonl"
     config_path = run_path / "config.resolved.yaml"
@@ -342,6 +383,7 @@ def retry_failed(run_dir: str = typer.Option(..., help="Existing run directory c
         raise typer.Exit(code=1)
 
     original_rows = load_jsonl(results_path)
+    emit_progress(default_progress_printer, {"command": "retry-failed", "step": "load_results", "status": "ok", "path": str(results_path), "count": len(original_rows)})
     failed_ids = [str(row.get("question_id")) for row in original_rows if _row_needs_retry(row)]
     if not failed_ids:
         console.print("No failed rows found; nothing to retry.")
@@ -352,18 +394,25 @@ def retry_failed(run_dir: str = typer.Option(..., help="Existing run directory c
     backup_dir = run_path / "backups" / f"retry_failed_{stamp}"
 
     cfg = _unredact_config_for_retry(load_config(config_path))
+    emit_progress(default_progress_printer, {"command": "retry-failed", "step": "select_failed", "status": "ok", "count": len(failed_ids)})
     cfg.output.output_dir = str(retry_dir)
     _exit_if_local_paths_missing(cfg)
 
-    retry_output_dir = run_benchmark(cfg, RagflowClient(cfg.ragflow), question_ids=set(failed_ids))
+    retry_output_dir = run_benchmark(cfg, RagflowClient(cfg.ragflow), question_ids=set(failed_ids), progress_callback=default_progress_printer)
     retry_rows = load_jsonl(retry_output_dir / "results.jsonl")
+    emit_progress(default_progress_printer, {"command": "retry-failed", "step": "load_retry_results", "status": "ok", "path": str(retry_output_dir / "results.jsonl"), "count": len(retry_rows)})
     merged_rows, replaced = _merge_retry_rows(original_rows, retry_rows)
+    emit_progress(default_progress_printer, {"command": "retry-failed", "step": "merge", "status": "ok", "count": len(merged_rows), "replaced": replaced})
 
     copied = _backup_run_artifacts(run_path, backup_dir)
+    emit_progress(default_progress_printer, {"command": "retry-failed", "step": "backup", "status": "ok", "path": str(backup_dir), "count": len(copied)})
     write_jsonl(results_path, merged_rows)
+    emit_progress(default_progress_printer, {"command": "retry-failed", "step": "results_write", "status": "ok", "path": str(results_path), "count": len(merged_rows)})
     jsonl_to_csv(results_path, run_path / "results.csv")
+    emit_progress(default_progress_printer, {"command": "retry-failed", "step": "csv_write", "status": "ok", "path": str(run_path / "results.csv")})
     summary = build_summary(benchmark=merged_rows[0].get("benchmark", "") if merged_rows else "", mode=cfg.benchmark.mode.value, rows=merged_rows)
     write_json(run_path / "summary.json", summary)
+    emit_progress(default_progress_printer, {"command": "retry-failed", "step": "summary_write", "status": "ok", "path": str(run_path / "summary.json")})
 
     successful_retries = sum(1 for row in retry_rows if not _row_needs_retry(row))
     remaining_errors = sum(1 for row in merged_rows if _row_needs_retry(row))
@@ -379,15 +428,19 @@ def retry_failed(run_dir: str = typer.Option(..., help="Existing run directory c
         "remaining_errors": remaining_errors,
     }
     write_json(retry_output_dir / "retry_report.json", report)
+    emit_progress(default_progress_printer, {"command": "retry-failed", "step": "complete", "status": "ok", "count": len(retry_rows), "replaced": replaced, "remaining_errors": remaining_errors})
     console.print_json(json.dumps(report, ensure_ascii=False))
 
 
 @app.command()
 def score(results: str = typer.Option(..., help="Path to results.jsonl")) -> None:
     path = Path(results)
+    emit_progress(default_progress_printer, {"command": "score", "step": "load_results", "status": "start", "path": str(path)})
     rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    emit_progress(default_progress_printer, {"command": "score", "step": "load_results", "status": "ok", "path": str(path), "count": len(rows)})
     rescored = []
-    for row in rows:
+    for index, row in enumerate(rows, start=1):
+        emit_progress(default_progress_printer, {"command": "score", "step": "row", "status": "start", "index": index, "total": len(rows), "question_id": row.get("question_id")})
         row["exact_match"] = exact_match(row.get("gold_answer"), row.get("ragflow_answer"))
         row["normalized_match"] = normalized_match(row.get("gold_answer"), row.get("ragflow_answer"))
         row["source_recall"] = source_recall(row.get("expected_sources", []), row.get("retrieved_source_uris", []))
@@ -398,8 +451,10 @@ def score(results: str = typer.Option(..., help="Path to results.jsonl")) -> Non
             source_recall=row["source_recall"],
         )
         rescored.append(row)
+        emit_progress(default_progress_printer, {"command": "score", "step": "row", "status": row["failure_type"], "index": index, "total": len(rows), "question_id": row.get("question_id")})
     summary = build_summary(benchmark=rows[0].get("benchmark", ""), mode="rescored", rows=rescored) if rows else {}
     write_json(path.with_name("summary.json"), summary)
+    emit_progress(default_progress_printer, {"command": "score", "step": "summary_write", "status": "ok", "path": str(path.with_name("summary.json")), "count": len(rescored)})
     console.print_json(json.dumps(summary, ensure_ascii=False))
 
 
@@ -420,7 +475,7 @@ def judge(
         client=ZhipuJudgeClient(settings),
         output_path=output,
         resume=resume,
-        progress_callback=default_progress_printer,
+        progress_callback=judge_progress_printer,
     )
     console.print_json(json.dumps(summary, ensure_ascii=False))
 
