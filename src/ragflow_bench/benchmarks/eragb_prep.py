@@ -7,7 +7,8 @@ from pathlib import Path
 from typing import Any, Literal
 
 import pandas as pd
-from huggingface_hub import hf_hub_download
+from huggingface_hub import HfApi, hf_hub_download
+from huggingface_hub.errors import HfHubHTTPError, LocalEntryNotFoundError, OfflineModeIsEnabled
 
 from ragflow_bench.logging_utils import ProgressCallback, emit_progress
 from ragflow_bench.reports.writers import write_json, write_jsonl
@@ -18,6 +19,11 @@ QUESTIONS_REPO_PATH = "data/questions/test.parquet"
 ERAGB_DOC_BOUNDARY = "<<<ERAGB_DOC_BOUNDARY>>>"
 ERAGB_PARSER_DELIMITER = f"`{ERAGB_DOC_BOUNDARY}`"
 ReferenceGranularity = Literal["document", "shard", "none"]
+REQUIRED_REPO_PATHS = (DOCUMENTS_REPO_PATH, QUESTIONS_REPO_PATH)
+
+
+class ERAGBDownloadError(RuntimeError):
+    """Raised when EnterpriseRAG-Bench artifacts cannot be verified or downloaded."""
 
 
 def prepare_eragb_artifacts(
@@ -58,6 +64,11 @@ def prepare_eragb_artifacts(
     corpus_dir.mkdir(parents=True, exist_ok=True)
 
     token = os.getenv(hf_token_env_var) if hf_token_env_var else None
+    if refresh or not (documents_raw_dir / Path(DOCUMENTS_REPO_PATH).name).exists() or not (questions_raw_dir / Path(QUESTIONS_REPO_PATH).name).exists():
+        emit_progress(progress_callback, {"command": "prepare-eragb", "step": "verify_hf_repo", "status": "start", "dataset_id": ERAGB_DATASET_ID})
+        _verify_hf_repo_paths(token=token)
+        emit_progress(progress_callback, {"command": "prepare-eragb", "step": "verify_hf_repo", "status": "ok", "dataset_id": ERAGB_DATASET_ID})
+
     emit_progress(progress_callback, {"command": "prepare-eragb", "step": "download_documents", "status": "start", "path": DOCUMENTS_REPO_PATH})
     documents_parquet = _download_hf_file(
         repo_path=DOCUMENTS_REPO_PATH,
@@ -162,19 +173,44 @@ def prepare_eragb_artifacts(
     return report
 
 
+def _verify_hf_repo_paths(*, token: str | None) -> None:
+    try:
+        repo_files = set(HfApi().list_repo_files(repo_id=ERAGB_DATASET_ID, repo_type="dataset", token=token))
+    except Exception as exc:
+        raise ERAGBDownloadError(
+            "Could not verify EnterpriseRAG-Bench files on Hugging Face. "
+            f"Dataset: {ERAGB_DATASET_ID}. Expected files: {', '.join(REQUIRED_REPO_PATHS)}. "
+            f"Original error: {type(exc).__name__}: {exc}"
+        ) from exc
+    missing = [path for path in REQUIRED_REPO_PATHS if path not in repo_files]
+    if missing:
+        raise ERAGBDownloadError(
+            "EnterpriseRAG-Bench Hugging Face repo was found, but required parquet files are missing. "
+            f"Dataset: {ERAGB_DATASET_ID}. Missing: {', '.join(missing)}. "
+            f"Expected files: {', '.join(REQUIRED_REPO_PATHS)}."
+        )
+
+
 def _download_hf_file(*, repo_path: str, local_dir: Path, refresh: bool, token: str | None) -> Path:
     target = local_dir / Path(repo_path).name
     if target.exists() and not refresh:
         return target
-    downloaded = hf_hub_download(
-        repo_id=ERAGB_DATASET_ID,
-        repo_type="dataset",
-        filename=repo_path,
-        local_dir=local_dir,
-        local_dir_use_symlinks=False,
-        force_download=refresh,
-        token=token,
-    )
+    try:
+        downloaded = hf_hub_download(
+            repo_id=ERAGB_DATASET_ID,
+            repo_type="dataset",
+            filename=repo_path,
+            local_dir=local_dir,
+            force_download=refresh,
+            token=token,
+        )
+    except (LocalEntryNotFoundError, OfflineModeIsEnabled, HfHubHTTPError, OSError) as exc:
+        raise ERAGBDownloadError(
+            "EnterpriseRAG-Bench file exists on Hugging Face but could not be downloaded. "
+            f"Dataset: {ERAGB_DATASET_ID}. File: {repo_path}. Local target: {target}. "
+            "Check Hugging Face connectivity/access, set HF_TOKEN if needed, or unset HF_HUB_OFFLINE. "
+            f"Original error: {type(exc).__name__}: {exc}"
+        ) from exc
     downloaded_path = Path(downloaded)
     if downloaded_path != target and downloaded_path.exists():
         target.write_bytes(downloaded_path.read_bytes())

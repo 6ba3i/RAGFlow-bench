@@ -12,6 +12,7 @@ from rich.table import Table
 
 from ragflow_bench.config import AppConfig, DatasetStrategy, JudgeSettings, RagflowConnectionConfig, ensure_local_paths_exist, load_config
 from ragflow_bench.benchmarks import prepare_eragb_artifacts, prepare_frames_artifacts
+from ragflow_bench.benchmarks.eragb_prep import ERAGBDownloadError
 from ragflow_bench.execution.benchmark_runner import make_adapter, run_benchmark
 from ragflow_bench.ingestion.ingest import ingest_documents, resolve_dataset_id
 from ragflow_bench.judge import ZhipuJudgeClient, default_progress_printer as judge_progress_printer, is_excluded_infra_error, judge_results_file
@@ -160,20 +161,24 @@ def prepare_eragb(
     filter_questions_with_missing_docs: bool = typer.Option(False, help="Drop questions whose expected docs are not present in the prepared corpus"),
     reference_granularity: str | None = typer.Option(None, help="Expected-source granularity: document, shard, or none. Defaults to shard in merged mode, document otherwise."),
 ) -> None:
-    report = prepare_eragb_artifacts(
-        split=split,
-        output_dir=output_dir,
-        document_limit=document_limit,
-        question_limit=question_limit,
-        refresh=refresh,
-        hf_token_env_var=hf_token_env_var,
-        merge_documents=merge_documents,
-        merge_target_bytes=merge_target_bytes,
-        merge_max_docs=merge_max_docs,
-        filter_questions_with_missing_docs=filter_questions_with_missing_docs,
-        reference_granularity=reference_granularity,
-        progress_callback=default_progress_printer,
-    )
+    try:
+        report = prepare_eragb_artifacts(
+            split=split,
+            output_dir=output_dir,
+            document_limit=document_limit,
+            question_limit=question_limit,
+            refresh=refresh,
+            hf_token_env_var=hf_token_env_var,
+            merge_documents=merge_documents,
+            merge_target_bytes=merge_target_bytes,
+            merge_max_docs=merge_max_docs,
+            filter_questions_with_missing_docs=filter_questions_with_missing_docs,
+            reference_granularity=reference_granularity,
+            progress_callback=default_progress_printer,
+        )
+    except ERAGBDownloadError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
     table = Table(title="ragflow-bench prepare-eragb")
     table.add_column("artifact")
     table.add_column("value")

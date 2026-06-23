@@ -5,6 +5,7 @@ import pytest
 import yaml
 
 from ragflow_bench import cli
+from ragflow_bench.benchmarks.eragb_prep import ERAGBDownloadError
 from ragflow_bench.config import AppConfig, BenchmarkConfig, BenchmarkKind, BenchmarkMode, DatasetConfig, DatasetStrategy
 
 
@@ -339,6 +340,19 @@ def test_retry_failed_no_failed_rows_does_not_rewrite(tmp_path, capsys):
     assert "No failed rows found" in capsys.readouterr().out
     assert not (run_dir / "backups").exists()
     assert not (run_dir / "retries").exists()
+
+
+def test_prepare_eragb_cli_reports_download_error(monkeypatch, capsys):
+    def fail_prepare(**kwargs):
+        raise ERAGBDownloadError("verified repo path but download failed")
+
+    monkeypatch.setattr(cli, "prepare_eragb_artifacts", fail_prepare)
+
+    with pytest.raises(cli.typer.Exit) as exc_info:
+        cli.prepare_eragb()
+
+    assert exc_info.value.exit_code == 1
+    assert "verified repo path but download failed" in capsys.readouterr().out
 
 
 def test_prepare_eragb_cli_prints_report(tmp_path, monkeypatch, capsys):

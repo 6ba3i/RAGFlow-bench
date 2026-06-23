@@ -1,9 +1,9 @@
 import json
-from pathlib import Path
-
 import pandas as pd
+import pytest
+from huggingface_hub.errors import LocalEntryNotFoundError
 
-from ragflow_bench.benchmarks.eragb_prep import prepare_eragb_artifacts
+from ragflow_bench.benchmarks.eragb_prep import ERAGBDownloadError, prepare_eragb_artifacts
 from ragflow_bench.benchmarks.enterprise_rag_bench import EnterpriseRAGBenchAdapter
 from ragflow_bench.config import AppConfig, BenchmarkConfig, BenchmarkKind, BenchmarkMode, DatasetConfig, DatasetStrategy
 
@@ -41,10 +41,14 @@ def test_prepare_eragb_artifacts_downloads_and_converts_parquet(tmp_path, monkey
         ]
     ).to_parquet(source_questions)
 
-    def fake_download(*, repo_id, repo_type, filename, local_dir, local_dir_use_symlinks, force_download, token):
+    monkeypatch.setattr(
+        "ragflow_bench.benchmarks.eragb_prep.HfApi.list_repo_files",
+        lambda self, **kwargs: ["data/documents/test.parquet", "data/questions/test.parquet"],
+    )
+
+    def fake_download(*, repo_id, repo_type, filename, local_dir, force_download, token):
         assert repo_id == "onyx-dot-app/EnterpriseRAG-Bench"
         assert repo_type == "dataset"
-        assert local_dir_use_symlinks is False
         assert token is None
         return str(source_docs if "documents" in filename else source_questions)
 
@@ -168,6 +172,10 @@ def test_prepare_eragb_merged_mode_writes_chunk_safe_shards_and_maps_questions(t
     ).to_parquet(source_questions)
 
     monkeypatch.setattr(
+        "ragflow_bench.benchmarks.eragb_prep.HfApi.list_repo_files",
+        lambda self, **kwargs: ["data/documents/test.parquet", "data/questions/test.parquet"],
+    )
+    monkeypatch.setattr(
         "ragflow_bench.benchmarks.eragb_prep.hf_hub_download",
         lambda **kwargs: str(source_docs if "documents" in kwargs["filename"] else source_questions),
     )
@@ -215,6 +223,10 @@ def test_prepare_eragb_merged_mode_can_disable_reference_sources(tmp_path, monke
     pd.DataFrame([{"doc_id": "dsid_1", "source_type": "slack", "title": "One", "content": "one"}]).to_parquet(source_docs)
     pd.DataFrame([{"question_id": "qst_1", "question": "one?", "expected_doc_ids": ["dsid_1"], "gold_answer": "one"}]).to_parquet(source_questions)
     monkeypatch.setattr(
+        "ragflow_bench.benchmarks.eragb_prep.HfApi.list_repo_files",
+        lambda self, **kwargs: ["data/documents/test.parquet", "data/questions/test.parquet"],
+    )
+    monkeypatch.setattr(
         "ragflow_bench.benchmarks.eragb_prep.hf_hub_download",
         lambda **kwargs: str(source_docs if "documents" in kwargs["filename"] else source_questions),
     )
@@ -224,6 +236,42 @@ def test_prepare_eragb_merged_mode_can_disable_reference_sources(tmp_path, monke
     questions = [json.loads(line) for line in (tmp_path / "eragb" / "questions.jsonl").read_text(encoding="utf-8").splitlines()]
     assert questions[0]["expected_sources"] == []
     assert questions[0]["reference_granularity"] == "none"
+
+
+def test_prepare_eragb_verifies_required_hf_paths_before_download(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "ragflow_bench.benchmarks.eragb_prep.HfApi.list_repo_files",
+        lambda self, **kwargs: ["data/documents/test.parquet"],
+    )
+
+    with pytest.raises(ERAGBDownloadError) as exc_info:
+        prepare_eragb_artifacts(output_dir=tmp_path / "eragb")
+
+    message = str(exc_info.value)
+    assert "onyx-dot-app/EnterpriseRAG-Bench" in message
+    assert "data/questions/test.parquet" in message
+    assert "required parquet files are missing" in message
+
+
+def test_prepare_eragb_reports_download_failure_after_path_verification(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "ragflow_bench.benchmarks.eragb_prep.HfApi.list_repo_files",
+        lambda self, **kwargs: ["data/documents/test.parquet", "data/questions/test.parquet"],
+    )
+
+    def fail_download(**kwargs):
+        raise LocalEntryNotFoundError("no local entry after verified repo path")
+
+    monkeypatch.setattr("ragflow_bench.benchmarks.eragb_prep.hf_hub_download", fail_download)
+
+    with pytest.raises(ERAGBDownloadError) as exc_info:
+        prepare_eragb_artifacts(output_dir=tmp_path / "eragb")
+
+    message = str(exc_info.value)
+    assert "file exists on Hugging Face but could not be downloaded" in message
+    assert "Dataset: onyx-dot-app/EnterpriseRAG-Bench" in message
+    assert "File: data/documents/test.parquet" in message
+    assert str(tmp_path / "eragb" / "raw" / "documents" / "test.parquet") in message
 
 
 def test_prepare_eragb_rejects_shard_references_without_merge(tmp_path):
