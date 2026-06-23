@@ -361,7 +361,7 @@ def _normalize_questions(
     normalized: list[dict[str, Any]] = []
     dropped_missing = 0
     for row in questions_df.to_dict(orient="records"):
-        expected_doc_ids = _list_value(row.get("expected_sources") or row.get("expected_doc_ids") or row.get("expected_documents") or row.get("citations"))
+        expected_doc_ids = _expected_doc_ids_from_row(row)
         missing = [doc_id for doc_id in expected_doc_ids if doc_id not in prepared_doc_ids]
         if filter_questions_with_missing_docs and missing:
             dropped_missing += 1
@@ -394,10 +394,10 @@ def _normalize_question_row(
     missing_expected_doc_ids: list[str] | None = None,
     reference_granularity: str = "document",
 ) -> dict[str, Any]:
-    question_id = str(row.get("id") or row.get("question_id") or "")
-    raw_expected_doc_ids = expected_doc_ids if expected_doc_ids is not None else _list_value(row.get("expected_sources") or row.get("expected_doc_ids") or row.get("expected_documents") or row.get("citations"))
+    question_id = str(_first_present_value(row, ("id", "question_id")) or "")
+    raw_expected_doc_ids = expected_doc_ids if expected_doc_ids is not None else _expected_doc_ids_from_row(row)
     source_types = _list_value(row.get("source_types"))
-    reasoning = _list_value(row.get("reasoning_types") or row.get("reasoning_type") or row.get("question_type"))
+    reasoning = _list_value(_first_present_value(row, ("reasoning_types", "reasoning_type", "question_type")))
     payload = {key: _jsonable(value) for key, value in row.items()}
     payload.update(
         {
@@ -413,6 +413,26 @@ def _normalize_question_row(
         }
     )
     return payload
+
+
+def _expected_doc_ids_from_row(row: dict[str, Any]) -> list[str]:
+    return _list_value(_first_present_value(row, ("expected_sources", "expected_doc_ids", "expected_documents", "citations")))
+
+
+def _first_present_value(row: dict[str, Any], keys: tuple[str, ...]) -> Any:
+    for key in keys:
+        if key in row and not _is_missing_value(row[key]):
+            return row[key]
+    return None
+
+
+def _is_missing_value(value: Any) -> bool:
+    if value is None:
+        return True
+    try:
+        return bool(pd.isna(value))
+    except (TypeError, ValueError):
+        return False
 
 
 def _document_rows(df: pd.DataFrame) -> list[dict[str, str]]:

@@ -1,4 +1,5 @@
 import json
+import numpy as np
 import pandas as pd
 import pytest
 from huggingface_hub.errors import LocalEntryNotFoundError
@@ -152,6 +153,39 @@ def test_enterprise_adapter_reads_onyx_and_manifest_relative_paths(tmp_path):
     assert loaded_questions[0].reasoning_types == ["basic"]
     assert documents[0].source_uri == "dsid_1"
     assert documents[0].title == "Multipart upload PR"
+
+
+def test_prepare_eragb_handles_array_expected_sources(tmp_path, monkeypatch):
+    source_docs = tmp_path / "source_documents.parquet"
+    source_questions = tmp_path / "source_questions.parquet"
+    pd.DataFrame([{"doc_id": "dsid_1", "source_type": "slack", "title": "One", "content": "one"}]).to_parquet(source_docs)
+    pd.DataFrame(
+        [
+            {
+                "question_id": "qst_1",
+                "question": "one?",
+                "expected_sources": np.array(["dsid_1"]),
+                "expected_doc_ids": np.array(["ignored_lower_precedence"]),
+                "reasoning_types": np.array(["basic"]),
+                "gold_answer": "one",
+            }
+        ]
+    ).to_parquet(source_questions)
+    monkeypatch.setattr(
+        "ragflow_bench.benchmarks.eragb_prep.HfApi.list_repo_files",
+        lambda self, **kwargs: ["data/documents/test.parquet", "data/questions/test.parquet"],
+    )
+    monkeypatch.setattr(
+        "ragflow_bench.benchmarks.eragb_prep.hf_hub_download",
+        lambda **kwargs: str(source_docs if "documents" in kwargs["filename"] else source_questions),
+    )
+
+    prepare_eragb_artifacts(output_dir=tmp_path / "eragb")
+
+    questions = [json.loads(line) for line in (tmp_path / "eragb" / "questions.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert questions[0]["expected_doc_ids"] == ["dsid_1"]
+    assert questions[0]["expected_sources"] == ["dsid_1"]
+    assert questions[0]["reasoning_types"] == ["basic"]
 
 
 def test_prepare_eragb_merged_mode_writes_chunk_safe_shards_and_maps_questions(tmp_path, monkeypatch):
