@@ -1,0 +1,11 @@
+{
+  "split": "test",
+  "question_count": 2,
+  "mapped_question_count": 2,
+  "unique_wikipedia_url_count": 8,
+  "downloaded_page_count": 8,
+  "failure_count": 0,
+  "mapping_path": "data/frames-smoke/frames_mapping.json",
+  "corpus_dir": "data/frames-smoke/corpus",
+  "failures": []
+}

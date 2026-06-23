@@ -2,25 +2,65 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+from datetime import datetime
 from pathlib import Path
 
 import typer
 from rich.console import Console
 from rich.table import Table
 
-from ragflow_bench.config import DatasetStrategy, RagflowConnectionConfig, ensure_local_paths_exist, load_config
+from ragflow_bench.config import AppConfig, DatasetStrategy, JudgeSettings, RagflowConnectionConfig, ensure_local_paths_exist, load_config
+from ragflow_bench.benchmarks import prepare_eragb_artifacts, prepare_frames_artifacts
 from ragflow_bench.execution.benchmark_runner import make_adapter, run_benchmark
 from ragflow_bench.ingestion.ingest import ingest_documents, resolve_dataset_id
+from ragflow_bench.judge import ZhipuJudgeClient, default_progress_printer, is_excluded_infra_error, judge_results_file
 from ragflow_bench.logging_utils import configure_logging
 from ragflow_bench.ragflow import RagflowClient
 from ragflow_bench.ragflow.errors import RagflowAPIError, RagflowConfigError
 from ragflow_bench.reports.summary import build_summary
-from ragflow_bench.reports.writers import write_json
+from ragflow_bench.reports.writers import jsonl_to_csv, load_jsonl, write_json, write_jsonl
 from ragflow_bench.scoring import classify_failure, exact_match, normalized_match, source_recall
 from ragflow_bench.wizard import run_wizard
 
 app = typer.Typer(help="Standalone benchmark harness for evaluating RAGFlow over raw HTTP APIs")
 console = Console()
+
+
+def _unredact_config_for_retry(cfg: AppConfig) -> AppConfig:
+    if cfg.ragflow.api_key == "***REDACTED***":
+        cfg.ragflow.api_key = None
+    if cfg.judge.api_key == "***REDACTED***":
+        cfg.judge.api_key = None
+    return cfg
+
+
+def _backup_run_artifacts(run_dir: Path, backup_dir: Path) -> list[str]:
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    copied: list[str] = []
+    for name in ("results.jsonl", "results.csv", "summary.json"):
+        source = run_dir / name
+        if source.exists():
+            shutil.copy2(source, backup_dir / name)
+            copied.append(name)
+    return copied
+
+
+def _row_needs_retry(row: dict) -> bool:
+    return bool(row.get("error")) or is_excluded_infra_error(row)
+
+
+def _merge_retry_rows(original_rows: list[dict], retry_rows: list[dict]) -> tuple[list[dict], int]:
+    original_ids = [str(row.get("question_id")) for row in original_rows]
+    original_id_set = set(original_ids)
+    retry_by_id: dict[str, dict] = {}
+    for row in retry_rows:
+        question_id = str(row.get("question_id"))
+        if question_id not in original_id_set:
+            raise ValueError(f"Retry produced unknown question_id: {question_id}")
+        retry_by_id[question_id] = row
+    merged = [retry_by_id.get(str(row.get("question_id")), row) for row in original_rows]
+    return merged, len(retry_by_id)
 
 
 def _load_dotenv(path: str | Path = ".env") -> None:
@@ -45,6 +85,18 @@ def _load_dotenv(path: str | Path = ".env") -> None:
         os.environ[key] = value
 
 
+def _exit_if_local_paths_missing(cfg) -> None:
+    errors = ensure_local_paths_exist(cfg)
+    if not errors:
+        return
+    console.print("[red]Missing required local benchmark files:[/red]")
+    for error in errors:
+        console.print(f"- {error}")
+    if getattr(cfg.benchmark, "kind", None) and str(cfg.benchmark.kind.value) == "frames":
+        console.print("[yellow]Hint:[/yellow] run [bold]ragflow-bench prepare-frames[/bold] first.")
+    raise typer.Exit(code=1)
+
+
 @app.callback()
 def main_callback(verbose: bool = typer.Option(False, "--verbose", help="Enable debug logging")):
     _load_dotenv()
@@ -57,8 +109,79 @@ def wizard() -> None:
     console.print(f"Saved wizard config to {target}")
     if should_run:
         cfg = load_config(target)
+        _exit_if_local_paths_missing(cfg)
         output_dir = run_benchmark(cfg, RagflowClient(cfg.ragflow))
         console.print(f"Run completed: {output_dir}")
+
+
+@app.command("prepare-frames")
+def prepare_frames(
+    split: str = typer.Option("test", help="FRAMES split to prepare"),
+    question_limit: int | None = typer.Option(None, help="Optional question limit for a smaller local corpus"),
+    output_dir: str = typer.Option("data/frames", help="Output directory for mapping, report, and corpus"),
+    refresh: bool = typer.Option(False, help="Re-download and rewrite existing page files"),
+) -> None:
+    report = prepare_frames_artifacts(
+        split=split,
+        question_limit=question_limit,
+        output_dir=output_dir,
+        refresh=refresh,
+    )
+    table = Table(title="ragflow-bench prepare-frames")
+    table.add_column("artifact")
+    table.add_column("value")
+    table.add_row("split", str(report["split"]))
+    table.add_row("questions", str(report["question_count"]))
+    table.add_row("mapped_questions", str(report["mapped_question_count"]))
+    table.add_row("unique_wikipedia_urls", str(report["unique_wikipedia_url_count"]))
+    table.add_row("downloaded_pages", str(report["downloaded_page_count"]))
+    table.add_row("failures", str(report["failure_count"]))
+    table.add_row("mapping_path", str(report["mapping_path"]))
+    table.add_row("corpus_dir", str(report["corpus_dir"]))
+    console.print(table)
+    console.print_json(json.dumps(report, ensure_ascii=False))
+
+
+@app.command("prepare-eragb")
+def prepare_eragb(
+    split: str = typer.Option("test", help="EnterpriseRAG-Bench split to prepare"),
+    output_dir: str = typer.Option("data/eragb", help="Output directory for raw parquet, corpus, questions, manifest, and report"),
+    document_limit: int | None = typer.Option(None, help="Optional document limit for smaller local corpora"),
+    question_limit: int | None = typer.Option(None, help="Optional question limit for smaller local question sets"),
+    refresh: bool = typer.Option(False, help="Re-download parquet files and rewrite generated artifacts"),
+    hf_token_env_var: str = typer.Option("HF_TOKEN", help="Environment variable containing a Hugging Face token, if needed"),
+    merge_documents: bool = typer.Option(False, help="Merge ERAGB rows into deterministic chunk-safe shard files"),
+    merge_target_bytes: int = typer.Option(262144, help="Target maximum shard size in bytes when merging documents"),
+    merge_max_docs: int = typer.Option(100, help="Maximum embedded documents per shard when merging documents"),
+    filter_questions_with_missing_docs: bool = typer.Option(False, help="Drop questions whose expected docs are not present in the prepared corpus"),
+    reference_granularity: str | None = typer.Option(None, help="Expected-source granularity: document, shard, or none. Defaults to shard in merged mode, document otherwise."),
+) -> None:
+    report = prepare_eragb_artifacts(
+        split=split,
+        output_dir=output_dir,
+        document_limit=document_limit,
+        question_limit=question_limit,
+        refresh=refresh,
+        hf_token_env_var=hf_token_env_var,
+        merge_documents=merge_documents,
+        merge_target_bytes=merge_target_bytes,
+        merge_max_docs=merge_max_docs,
+        filter_questions_with_missing_docs=filter_questions_with_missing_docs,
+        reference_granularity=reference_granularity,
+    )
+    table = Table(title="ragflow-bench prepare-eragb")
+    table.add_column("artifact")
+    table.add_column("value")
+    table.add_row("split", str(report["split"]))
+    table.add_row("documents", str(report["document_count"]))
+    table.add_row("shards", str(report["shard_count"]))
+    table.add_row("questions", str(report["question_count_written"]))
+    table.add_row("reference_granularity", str(report["reference_granularity"]))
+    table.add_row("corpus_dir", str(report["corpus_dir"]))
+    table.add_row("questions_path", str(report["questions_path"]))
+    table.add_row("documents_manifest", str(report["documents_manifest_path"]))
+    console.print(table)
+    console.print_json(json.dumps(report, ensure_ascii=False))
 
 
 @app.command()
@@ -164,9 +287,10 @@ def doctor(config: str | None = typer.Option(None, help="Optional config path fo
 @app.command()
 def ingest(config: str = typer.Option(..., help="Config YAML path")) -> None:
     cfg = load_config(config)
+    _exit_if_local_paths_missing(cfg)
     client = RagflowClient(cfg.ragflow)
     adapter = make_adapter(cfg)
-    output_dir = Path(cfg.output.output_dir or cfg.default_output_dir())
+    output_dir = cfg.resolved_output_dir()
     output_dir.mkdir(parents=True, exist_ok=True)
     registry = ingest_documents(cfg, client, adapter, output_dir)
     console.print_json(json.dumps(registry.to_dict(), ensure_ascii=False))
@@ -175,9 +299,16 @@ def ingest(config: str = typer.Option(..., help="Config YAML path")) -> None:
 @app.command()
 def retrieve(config: str = typer.Option(..., help="Config YAML path")) -> None:
     cfg = load_config(config)
+    _exit_if_local_paths_missing(cfg)
     client = RagflowClient(cfg.ragflow)
     adapter = make_adapter(cfg)
-    dataset_id = resolve_dataset_id(cfg, client, adapter)
+    if cfg.dataset.strategy == DatasetStrategy.CREATE_AND_INGEST:
+        output_dir = cfg.resolved_output_dir()
+        output_dir.mkdir(parents=True, exist_ok=True)
+        registry = ingest_documents(cfg, client, adapter, output_dir)
+        dataset_id = registry.dataset_id
+    else:
+        dataset_id = resolve_dataset_id(cfg, client, adapter)
     question = adapter.load_questions()[0]
     payload = client.retrieve(
         question=question.question,
@@ -193,8 +324,62 @@ def retrieve(config: str = typer.Option(..., help="Config YAML path")) -> None:
 @app.command()
 def run(config: str = typer.Option(..., help="Config YAML path")) -> None:
     cfg = load_config(config)
+    _exit_if_local_paths_missing(cfg)
     output_dir = run_benchmark(cfg, RagflowClient(cfg.ragflow))
     console.print(f"Run completed: {output_dir}")
+
+
+@app.command("retry-failed")
+def retry_failed(run_dir: str = typer.Option(..., help="Existing run directory containing results.jsonl and config.resolved.yaml")) -> None:
+    run_path = Path(run_dir)
+    results_path = run_path / "results.jsonl"
+    config_path = run_path / "config.resolved.yaml"
+    if not results_path.exists():
+        console.print(f"[red]Missing results file:[/red] {results_path}")
+        raise typer.Exit(code=1)
+    if not config_path.exists():
+        console.print(f"[red]Missing resolved config:[/red] {config_path}")
+        raise typer.Exit(code=1)
+
+    original_rows = load_jsonl(results_path)
+    failed_ids = [str(row.get("question_id")) for row in original_rows if _row_needs_retry(row)]
+    if not failed_ids:
+        console.print("No failed rows found; nothing to retry.")
+        return
+
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    retry_dir = run_path / "retries" / f"retry_failed_{stamp}"
+    backup_dir = run_path / "backups" / f"retry_failed_{stamp}"
+
+    cfg = _unredact_config_for_retry(load_config(config_path))
+    cfg.output.output_dir = str(retry_dir)
+    _exit_if_local_paths_missing(cfg)
+
+    retry_output_dir = run_benchmark(cfg, RagflowClient(cfg.ragflow), question_ids=set(failed_ids))
+    retry_rows = load_jsonl(retry_output_dir / "results.jsonl")
+    merged_rows, replaced = _merge_retry_rows(original_rows, retry_rows)
+
+    copied = _backup_run_artifacts(run_path, backup_dir)
+    write_jsonl(results_path, merged_rows)
+    jsonl_to_csv(results_path, run_path / "results.csv")
+    summary = build_summary(benchmark=merged_rows[0].get("benchmark", "") if merged_rows else "", mode=cfg.benchmark.mode.value, rows=merged_rows)
+    write_json(run_path / "summary.json", summary)
+
+    successful_retries = sum(1 for row in retry_rows if not _row_needs_retry(row))
+    remaining_errors = sum(1 for row in merged_rows if _row_needs_retry(row))
+    report = {
+        "run_dir": str(run_path),
+        "retry_output_dir": str(retry_output_dir),
+        "backup_dir": str(backup_dir),
+        "backed_up_files": copied,
+        "failed_rows_selected": len(failed_ids),
+        "retry_rows": len(retry_rows),
+        "replaced_rows": replaced,
+        "successful_retries": successful_retries,
+        "remaining_errors": remaining_errors,
+    }
+    write_json(retry_output_dir / "retry_report.json", report)
+    console.print_json(json.dumps(report, ensure_ascii=False))
 
 
 @app.command()
@@ -215,6 +400,28 @@ def score(results: str = typer.Option(..., help="Path to results.jsonl")) -> Non
         rescored.append(row)
     summary = build_summary(benchmark=rows[0].get("benchmark", ""), mode="rescored", rows=rescored) if rows else {}
     write_json(path.with_name("summary.json"), summary)
+    console.print_json(json.dumps(summary, ensure_ascii=False))
+
+
+@app.command()
+def judge(
+    results: str = typer.Option(..., help="Path to results.jsonl"),
+    config: str | None = typer.Option(None, help="Optional config YAML path with judge settings"),
+    model: str | None = typer.Option(None, help="Optional judge model override, e.g. glm-4-flash or glm-4.7-flash"),
+    output: str | None = typer.Option(None, help="Optional output path for judged JSONL"),
+    resume: bool = typer.Option(True, "--resume/--no-resume", help="Resume existing judge_results.jsonl by default; use --no-resume to overwrite."),
+) -> None:
+    cfg = load_config(config) if config else None
+    settings = cfg.judge if cfg else JudgeSettings()
+    if model:
+        settings.model = model
+    summary = judge_results_file(
+        results_path=results,
+        client=ZhipuJudgeClient(settings),
+        output_path=output,
+        resume=resume,
+        progress_callback=default_progress_printer,
+    )
     console.print_json(json.dumps(summary, ensure_ascii=False))
 
 

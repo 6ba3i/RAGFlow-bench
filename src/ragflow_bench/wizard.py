@@ -87,7 +87,12 @@ def run_wizard() -> tuple[Path, bool]:
         "output": {"output_dir": output_dir},
     }
     if benchmark == BenchmarkKind.FRAMES.value:
-        payload["benchmark"]["frames"] = {"split": "test", "mapping_path": "frames_mapping.json", "local_corpus_dir": "./frames_corpus"}
+        frames_artifact_dir = Prompt.ask("FRAMES artifact directory", default=f"data/frames-{mode}")
+        payload["benchmark"]["frames"] = {
+            "split": "test",
+            "mapping_path": str(Path(frames_artifact_dir) / "frames_mapping.json"),
+            "local_corpus_dir": str(Path(frames_artifact_dir) / "corpus"),
+        }
     elif benchmark == BenchmarkKind.ENTERPRISE_RAG_BENCH.value:
         payload["benchmark"]["enterprise_rag_bench"] = {"corpus_dir": "./corpus", "questions_path": "./questions.jsonl"}
     else:

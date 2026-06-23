@@ -55,6 +55,47 @@ class ChatSettings(BaseModel):
     refine_multiturn: bool = False
 
 
+class JudgeSettings(BaseModel):
+    provider: str = "zhipu"
+    base_url: str = "https://open.bigmodel.cn/api/paas/v4"
+    base_url_env_var: str = "ZHIPU_BASE_URL"
+    api_key: str | None = None
+    api_key_env_var: str = "ZHIPU_API_KEY"
+    model: str = "glm-4.7-flash"
+    model_env_var: str = "ZHIPU_JUDGE_MODEL"
+    temperature: float = 0.0
+    include_confidence: bool = True
+    timeout_seconds: int = 120
+    timeout_env_var: str = "ZHIPU_JUDGE_TIMEOUT_SECONDS"
+    max_retries: int = 3
+    max_retries_env_var: str = "ZHIPU_JUDGE_MAX_RETRIES"
+    backoff_seconds: float = 10.0
+    backoff_env_var: str = "ZHIPU_JUDGE_BACKOFF_SECONDS"
+    max_backoff_seconds: float = 10.0
+    max_backoff_env_var: str = "ZHIPU_JUDGE_MAX_BACKOFF_SECONDS"
+
+    def resolved_base_url(self) -> str:
+        return os.getenv(self.base_url_env_var, self.base_url or "https://open.bigmodel.cn/api/paas/v4")
+
+    def resolved_api_key(self) -> str | None:
+        return self.api_key or os.getenv(self.api_key_env_var)
+
+    def resolved_model(self) -> str:
+        return os.getenv(self.model_env_var, self.model or "glm-4.7-flash")
+
+    def resolved_timeout_seconds(self) -> int:
+        return int(os.getenv(self.timeout_env_var, str(self.timeout_seconds)))
+
+    def resolved_max_retries(self) -> int:
+        return max(0, int(os.getenv(self.max_retries_env_var, str(self.max_retries))))
+
+    def resolved_backoff_seconds(self) -> float:
+        return max(0.0, float(os.getenv(self.backoff_env_var, str(self.backoff_seconds))))
+
+    def resolved_max_backoff_seconds(self) -> float:
+        return max(0.0, float(os.getenv(self.max_backoff_env_var, str(self.max_backoff_seconds))))
+
+
 class RagflowConnectionConfig(BaseModel):
     base_url: str = "http://127.0.0.1:80"
     base_url_env_var: str = "RAGFLOW_BASE_URL"
@@ -117,6 +158,7 @@ class OutputConfig(BaseModel):
 class AppConfig(BaseModel):
     benchmark: BenchmarkConfig
     ragflow: RagflowConnectionConfig = Field(default_factory=RagflowConnectionConfig)
+    judge: JudgeSettings = Field(default_factory=JudgeSettings)
     dataset: DatasetConfig = Field(default_factory=DatasetConfig)
     retrieval: RetrievalSettings = Field(default_factory=RetrievalSettings)
     chat: ChatSettings = Field(default_factory=ChatSettings)
@@ -138,18 +180,24 @@ class AppConfig(BaseModel):
             return self.benchmark.enterprise_rag_bench
         return self.benchmark.custom
 
-    def default_output_dir(self) -> Path:
-        if self.output.output_dir:
-            return Path(self.output.output_dir)
+    def resolved_output_dir(self) -> Path:
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        if self.output.output_dir:
+            return Path(self.output.output_dir.replace("<timestamp>", stamp))
         return Path("outputs") / f"{self.benchmark.kind.value}_{self.benchmark.mode.value}_{stamp}"
 
+    def default_output_dir(self) -> Path:
+        return self.resolved_output_dir()
+
     def resolved_for_output(self) -> dict[str, Any]:
-        payload = deepcopy(self.model_dump(mode="python"))
+        payload = deepcopy(self.model_dump(mode="json"))
         payload["ragflow"]["base_url"] = self.ragflow.resolved_base_url()
         payload["ragflow"]["api_key"] = "***REDACTED***" if self.ragflow.resolved_api_key() else None
         payload["ragflow"]["llm_id"] = self.ragflow.resolved_llm_id()
-        payload["output"]["output_dir"] = str(self.default_output_dir())
+        payload["judge"]["base_url"] = self.judge.resolved_base_url()
+        payload["judge"]["api_key"] = "***REDACTED***" if self.judge.resolved_api_key() else None
+        payload["judge"]["model"] = self.judge.resolved_model()
+        payload["output"]["output_dir"] = str(self.resolved_output_dir())
         return payload
 
 

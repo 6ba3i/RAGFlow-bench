@@ -8,6 +8,13 @@ from datasets import load_dataset
 
 from ragflow_bench.benchmarks.base import BenchmarkAdapter, BenchmarkDocument, BenchmarkQuestion
 from ragflow_bench.config import AppConfig
+from ragflow_bench.benchmarks.frames_prep import (
+    extract_gold_answer,
+    extract_question_text,
+    extract_reasoning_types,
+    extract_wikipedia_urls,
+    question_id_for_row,
+)
 
 
 class FramesAdapter(BenchmarkAdapter):
@@ -29,20 +36,21 @@ class FramesAdapter(BenchmarkAdapter):
         questions: list[BenchmarkQuestion] = []
         limit = self.config.benchmark.question_limit
         for idx, row in enumerate(dataset):
-            qid = str(row.get("id", idx))
+            raw_row = dict(row)
+            qid = question_id_for_row(raw_row, idx)
             mapping = self.mapping.get(qid, {})
             expected = [item.get("wikipedia_url") for item in mapping.get("local_files", []) if item.get("wikipedia_url")]
-            reasoning = row.get("reasoning_types") or row.get("reasoning_type") or []
-            if isinstance(reasoning, str):
-                reasoning = [reasoning]
+            if not expected:
+                expected = extract_wikipedia_urls(raw_row)
+            reasoning = extract_reasoning_types(raw_row)
             questions.append(
                 BenchmarkQuestion(
                     id=qid,
-                    question=row.get("question") or row.get("prompt") or "",
-                    gold_answer=row.get("answer") or row.get("gold_answer"),
+                    question=extract_question_text(raw_row),
+                    gold_answer=extract_gold_answer(raw_row),
                     expected_sources=expected,
                     reasoning_types=list(reasoning),
-                    metadata={"raw": dict(row)},
+                    metadata={"raw": raw_row},
                 )
             )
             if limit and len(questions) >= limit:

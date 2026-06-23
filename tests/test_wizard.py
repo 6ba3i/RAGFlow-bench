@@ -22,6 +22,7 @@ def test_wizard_writes_embedding_model_for_new_dataset(tmp_path, monkeypatch):
         "Temperature": "0.0",
         "Top p": "0.1",
         "Output folder": "outputs/frames_smoke_<timestamp>",
+        "FRAMES artifact directory": "data/frames-smoke",
         "Config path": str(tmp_path / "wizard.yaml"),
     }
     int_answers = {
@@ -60,4 +61,5 @@ def test_wizard_writes_embedding_model_for_new_dataset(tmp_path, monkeypatch):
     assert should_run is False
     payload = yaml.safe_load(target.read_text(encoding="utf-8"))
     assert payload["dataset"]["embedding_model"] == "bge-m3"
-
+    assert payload["benchmark"]["frames"]["mapping_path"] == "data/frames-smoke/frames_mapping.json"
+    assert payload["benchmark"]["frames"]["local_corpus_dir"] == "data/frames-smoke/corpus"

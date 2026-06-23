@@ -24,8 +24,8 @@ def make_adapter(config: AppConfig) -> BenchmarkAdapter:
     return CustomBenchmarkAdapter(config)
 
 
-def run_benchmark(config: AppConfig, client) -> Path:
-    output_dir = Path(config.output.output_dir or config.default_output_dir())
+def run_benchmark(config: AppConfig, client, question_ids: set[str] | None = None) -> Path:
+    output_dir = config.resolved_output_dir()
     output_dir.mkdir(parents=True, exist_ok=True)
     dump_config(output_dir / "config.resolved.yaml", config.resolved_for_output())
     adapter = make_adapter(config)
@@ -40,11 +40,20 @@ def run_benchmark(config: AppConfig, client) -> Path:
         dataset_id = registry.dataset_id
     if not dataset_id:
         raise ValueError("No dataset_id available for benchmark run")
+    questions = adapter.load_questions()
+    selected_question_ids = {str(question_id) for question_id in question_ids} if question_ids is not None else None
+    if selected_question_ids is not None:
+        available_question_ids = {str(question.id) for question in questions}
+        missing = selected_question_ids - available_question_ids
+        if missing:
+            missing_list = ", ".join(sorted(missing))
+            raise ValueError(f"Unknown question_id(s): {missing_list}")
+        questions = [question for question in questions if str(question.id) in selected_question_ids]
     run_id = uuid4().hex
     results_path = output_dir / "results.jsonl"
     chat = ensure_chat(client, config, dataset_id, f"ragflow-bench-{run_id}") if config.ragflow.resolved_llm_id() else None
     rows: list[dict] = []
-    for question in adapter.load_questions():
+    for question in questions:
         error = None
         raw_retrieval = {}
         raw_response = {}
@@ -60,6 +69,9 @@ def run_benchmark(config: AppConfig, client) -> Path:
                 ragflow_answer = raw_response.get("answer") or raw_response.get("content") or raw_response.get("data", {}).get("answer")
         except Exception as exc:  # noqa: BLE001
             error = str(exc)
+        if error is None and isinstance(ragflow_answer, str) and ragflow_answer.strip().startswith("**ERROR**:"):
+            error = ragflow_answer.strip()
+
         chunks = raw_retrieval.get("chunks", []) if isinstance(raw_retrieval, dict) else []
         retrieved_document_ids = [chunk.get("doc_id") or chunk.get("document_id") for chunk in chunks if isinstance(chunk, dict)]
         retrieved_chunk_ids = [chunk.get("chunk_id") or chunk.get("id") for chunk in chunks if isinstance(chunk, dict)]

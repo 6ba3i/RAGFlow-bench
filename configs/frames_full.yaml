@@ -1,23 +1,26 @@
 benchmark:
   kind: frames
-  mode: oracle
+  mode: full
   question_limit: null
   frames:
     split: test
-    mapping_path: data/frames/frames_mapping.json
-    local_corpus_dir: data/frames/corpus
+    mapping_path: data/frames-full/frames_mapping.json
+    local_corpus_dir: data/frames-full/corpus
 ragflow:
   base_url: http://127.0.0.1:80
   api_key_env_var: RAGFLOW_API_KEY
   llm_id_env_var: RAGFLOW_LLM_ID
 dataset:
-  strategy: create_new_dataset_and_ingest_documents
-  name: frames-oracle
-  embedding_model: replace-with-ragflow-embedding-model-id
+  strategy: reuse_existing_dataset
+  dataset_id: 879b4e4c6ada11f19770634e43a5cd6f
+  name: null
+  embedding_model: null
   chunk_method: naive
   parser_config:
     chunk_token_num: 512
-    delimiter: "\n"
+    delimiter: '
+
+      '
     raptor:
       use_raptor: false
     graphrag:
@@ -35,3 +38,5 @@ chat:
   fresh_session_per_question: true
   quote: true
   refine_multiturn: false
+output:
+  output_dir: outputs/frames_full_<timestamp>

@@ -3,8 +3,8 @@ benchmark:
   mode: smoke
   question_limit: 25
   enterprise_rag_bench:
-    corpus_dir: ./eragb_corpus
-    questions_path: ./eragb_questions.jsonl
+    corpus_dir: data/eragb/corpus
+    questions_path: data/eragb/questions.jsonl
 ragflow:
   base_url: http://127.0.0.1:80
   api_key_env_var: RAGFLOW_API_KEY

@@ -13,7 +13,7 @@ from ragflow_bench.ragflow.errors import RagflowAPIError, RagflowConfigError
 
 
 class RagflowClient:
-    def __init__(self, connection: RagflowConnectionConfig, timeout: int = 60):
+    def __init__(self, connection: RagflowConnectionConfig, timeout: int = 180):
         self.connection = connection
         self.base_url = connection.resolved_base_url().rstrip("/")
         self.api_key = connection.resolved_api_key()

@@ -3,9 +3,9 @@ benchmark:
   mode: full
   question_limit: 100
   enterprise_rag_bench:
-    corpus_dir: ./eragb_corpus
-    questions_path: ./eragb_questions.jsonl
-    documents_manifest: ./eragb_documents.json
+    corpus_dir: data/eragb/corpus
+    questions_path: data/eragb/questions.jsonl
+    documents_manifest: data/eragb/documents_manifest.json
 ragflow:
   base_url: http://127.0.0.1:80
   api_key_env_var: RAGFLOW_API_KEY
@@ -17,7 +17,7 @@ dataset:
   chunk_method: naive
   parser_config:
     chunk_token_num: 512
-    delimiter: "\n"
+    delimiter: "`<<<ERAGB_DOC_BOUNDARY>>>`"
     raptor:
       use_raptor: false
     graphrag:

@@ -35,19 +35,21 @@ class EnterpriseRAGBenchAdapter(BenchmarkAdapter):
         limit = self.config.benchmark.question_limit
         results: list[BenchmarkQuestion] = []
         for idx, row in df.iterrows():
-            expected_sources = row.get("expected_sources") or row.get("expected_documents") or row.get("citations") or []
-            if isinstance(expected_sources, str):
-                expected_sources = [expected_sources]
-            reasoning = row.get("reasoning_types") or row.get("reasoning_type") or []
-            if isinstance(reasoning, str):
-                reasoning = [reasoning]
+            row_dict = row.to_dict()
+            expected_sources = _list_value(
+                row.get("expected_sources")
+                or row.get("expected_doc_ids")
+                or row.get("expected_documents")
+                or row.get("citations")
+            )
+            reasoning = _list_value(row.get("reasoning_types") or row.get("reasoning_type") or row.get("question_type") or row.get("source_types"))
             results.append(BenchmarkQuestion(
-                id=str(row.get("id", idx)),
-                question=str(row.get("question")),
+                id=str(row.get("id") or row.get("question_id") or idx),
+                question=str(row.get("question") or ""),
                 gold_answer=row.get("gold_answer") or row.get("answer"),
-                expected_sources=list(expected_sources),
-                reasoning_types=list(reasoning),
-                metadata=row.to_dict(),
+                expected_sources=expected_sources,
+                reasoning_types=reasoning,
+                metadata=row_dict,
             ))
             if limit and len(results) >= limit:
                 break
@@ -62,7 +64,8 @@ class EnterpriseRAGBenchAdapter(BenchmarkAdapter):
         for idx, path in enumerate(sorted(p for p in corpus_dir.rglob("*") if p.is_file())):
             meta = {}
             if isinstance(manifest, dict):
-                meta = manifest.get(path.name, {})
+                rel_path = path.relative_to(corpus_dir).as_posix()
+                meta = manifest.get(rel_path) or manifest.get(path.name, {})
             yield BenchmarkDocument(
                 id=str(meta.get("id", idx)),
                 path=path,
@@ -71,3 +74,16 @@ class EnterpriseRAGBenchAdapter(BenchmarkAdapter):
                 source_type=str(meta.get("source_type", path.suffix.lstrip(".") or "file")),
                 metadata=meta,
             )
+
+
+def _list_value(value) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item)]
+    if isinstance(value, tuple):
+        return [str(item) for item in value if str(item)]
+    if hasattr(value, "tolist"):
+        return _list_value(value.tolist())
+    text = str(value)
+    return [text] if text else []

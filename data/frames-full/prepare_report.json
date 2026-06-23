@@ -1,0 +1,92 @@
+{
+  "split": "test",
+  "question_count": 824,
+  "mapped_question_count": 824,
+  "unique_wikipedia_url_count": 2491,
+  "downloaded_page_count": 2491,
+  "failure_count": 16,
+  "mapping_path": "data/frames-full/frames_mapping.json",
+  "corpus_dir": "data/frames-full/corpus",
+  "failures": [
+    {
+      "question_id": "88",
+      "wikipedia_url": "https://en.wikipedia.org/w/index.php?search=Polytrichum+piliferum&title=Special:Search&profile=advanced&fulltext=1&ns0=1",
+      "error": "Unsupported Wikipedia URL: https://en.wikipedia.org/w/index.php?search=Polytrichum+piliferum&title=Special:Search&profile=advanced&fulltext=1&ns0=1"
+    },
+    {
+      "question_id": "90",
+      "wikipedia_url": "https://en.wikipedia.org/wiki/American_Family_Field, https://en.wikipedia.org/wiki/LoanDepot_Park, https://en.wikipedia.org/wiki/Globe_Life_Field, ",
+      "error": "Wikipedia page missing for https://en.wikipedia.org/wiki/American_Family_Field, https://en.wikipedia.org/wiki/LoanDepot_Park, https://en.wikipedia.org/wiki/Globe_Life_Field, "
+    },
+    {
+      "question_id": "98",
+      "wikipedia_url": "https://en.wikipedia.org/w/index.php?title=Bronco&redirect=no",
+      "error": "Unsupported Wikipedia URL: https://en.wikipedia.org/w/index.php?title=Bronco&redirect=no"
+    },
+    {
+      "question_id": "141",
+      "wikipedia_url": "https://en.wikipedia.org/wiki/Nemanja_Markovi%C4%87",
+      "error": "Wikipedia page missing for https://en.wikipedia.org/wiki/Nemanja_Markovi%C4%87"
+    },
+    {
+      "question_id": "179",
+      "wikipedia_url": "https://en.wikipedia.org/wiki/Module:Location_map/data/USA_New_York_City",
+      "error": "Wikipedia page has no extract for https://en.wikipedia.org/wiki/Module:Location_map/data/USA_New_York_City"
+    },
+    {
+      "question_id": "199",
+      "wikipedia_url": "https://en.wikipedia.org/wiki/Marie_of_Montpellier, https://en.wikipedia.org/wiki/James_I_of_Aragon, https://en.wikipedia.org/wiki/James_II_of_Majorca, https://en.wikipedia.org/wiki/Sancho_of_Majorca, https://en.wikipedia.org/wiki/James_III_of_Majorca",
+      "error": "Wikipedia page missing for https://en.wikipedia.org/wiki/Marie_of_Montpellier, https://en.wikipedia.org/wiki/James_I_of_Aragon, https://en.wikipedia.org/wiki/James_II_of_Majorca, https://en.wikipedia.org/wiki/Sancho_of_Majorca, https://en.wikipedia.org/wiki/James_III_of_Majorca"
+    },
+    {
+      "question_id": "230",
+      "wikipedia_url": "https://en.wikipedia.org/wiki/Tim_Salmon, https://en.wikipedia.org/wiki/Troy_Glaus",
+      "error": "Wikipedia page missing for https://en.wikipedia.org/wiki/Tim_Salmon, https://en.wikipedia.org/wiki/Troy_Glaus"
+    },
+    {
+      "question_id": "231",
+      "wikipedia_url": "https://en.wikipedia.org/wiki/Prince_of_Darkness_(film), https://en.wikipedia.org/wiki/They_Live, https://en.wikipedia.org/wiki/Memoirs_of_an_Invisible_Man_(film), https://en.wikipedia.org/wiki/In_the_Mouth_of_Madness, https://en.wikipedia.org/wiki/Village_of_the_Damned_(1995_film), https://en.wikipedia.org/wiki/Escape_from_L.A., https://en.wikipedia.org/wiki/Vampires_(1998_film), https://en.wikipedia.org/wiki/Ghosts_of_Mars, https://en.wikipedia.org/wiki/The_Ward_(film)",
+      "error": "Wikipedia page has no extract for https://en.wikipedia.org/wiki/Prince_of_Darkness_(film), https://en.wikipedia.org/wiki/They_Live, https://en.wikipedia.org/wiki/Memoirs_of_an_Invisible_Man_(film), https://en.wikipedia.org/wiki/In_the_Mouth_of_Madness, https://en.wikipedia.org/wiki/Village_of_the_Damned_(1995_film), https://en.wikipedia.org/wiki/Escape_from_L.A., https://en.wikipedia.org/wiki/Vampires_(1998_film), https://en.wikipedia.org/wiki/Ghosts_of_Mars, https://en.wikipedia.org/wiki/The_Ward_(film)"
+    },
+    {
+      "question_id": "495",
+      "wikipedia_url": "https://w.wiki/ASFv",
+      "error": "Unsupported Wikipedia URL: https://w.wiki/ASFv"
+    },
+    {
+      "question_id": "537",
+      "wikipedia_url": "https://en.wikipedia.org/wiki/Transformers:_Dark_of_the_Moon, https://en.wikipedia.org/wiki/Pain_%26_Gain, https://en.wikipedia.org/wiki/Transformers:_Age_of_Extinction, https://en.wikipedia.org/wiki/13_Hours:_The_Secret_Soldiers_of_Benghazi, https://en.wikipedia.org/wiki/Transformers:_The_Last_Knight, https://en.wikipedia.org/wiki/6_Underground_(film), https://en.wikipedia.org/wiki/Ambulance_(2022_film)",
+      "error": "Wikipedia page has no extract for https://en.wikipedia.org/wiki/Transformers:_Dark_of_the_Moon, https://en.wikipedia.org/wiki/Pain_%26_Gain, https://en.wikipedia.org/wiki/Transformers:_Age_of_Extinction, https://en.wikipedia.org/wiki/13_Hours:_The_Secret_Soldiers_of_Benghazi, https://en.wikipedia.org/wiki/Transformers:_The_Last_Knight, https://en.wikipedia.org/wiki/6_Underground_(film), https://en.wikipedia.org/wiki/Ambulance_(2022_film)"
+    },
+    {
+      "question_id": "540",
+      "wikipedia_url": "https://en.wikipedia.org/wiki/Jack_Vance_(tennis)",
+      "error": "Wikipedia page missing for https://en.wikipedia.org/wiki/Jack_Vance_(tennis)"
+    },
+    {
+      "question_id": "540",
+      "wikipedia_url": "https://en.wikipedia.org/wiki/Murkel_Dellien, https://en.wikipedia.org/wiki/Facundo_Mena, https://en.wikipedia.org/wiki/Louis_Wessels, https://en.wikipedia.org/wiki/Gabi_Adrian_Boitan, https://en.wikipedia.org/wiki/Trey_Hilderbrand, https://en.wikipedia.org/wiki/Oliver_Crawford_(tennis), https://en.wikipedia.org/wiki/Tristan_Boyer, https://en.wikipedia.org/wiki/Thomas_Fancutt, https://en.wikipedia.org/wiki/Hunter_Reese, https://en.wikipedia.org/wiki/Alex_Hern%C3%A1ndez_(tennis), ",
+      "error": "Wikipedia page has no extract for https://en.wikipedia.org/wiki/Murkel_Dellien, https://en.wikipedia.org/wiki/Facundo_Mena, https://en.wikipedia.org/wiki/Louis_Wessels, https://en.wikipedia.org/wiki/Gabi_Adrian_Boitan, https://en.wikipedia.org/wiki/Trey_Hilderbrand, https://en.wikipedia.org/wiki/Oliver_Crawford_(tennis), https://en.wikipedia.org/wiki/Tristan_Boyer, https://en.wikipedia.org/wiki/Thomas_Fancutt, https://en.wikipedia.org/wiki/Hunter_Reese, https://en.wikipedia.org/wiki/Alex_Hern%C3%A1ndez_(tennis), "
+    },
+    {
+      "question_id": "615",
+      "wikipedia_url": "https://en.wikipedia.org/wiki/Summer_Magic_(film), https://en.wikipedia.org/wiki/The_Incredible_Journey_(film), https://en.wikipedia.org/wiki/The_Sword_in_the_Stone_(1963_film)",
+      "error": "Wikipedia page missing for https://en.wikipedia.org/wiki/Summer_Magic_(film), https://en.wikipedia.org/wiki/The_Incredible_Journey_(film), https://en.wikipedia.org/wiki/The_Sword_in_the_Stone_(1963_film)"
+    },
+    {
+      "question_id": "644",
+      "wikipedia_url": "https://en.wikipedia.org/wiki/Pok%C3%A9mon (NOT REQUIRED, BUT HELPFUL) ",
+      "error": "Wikipedia page missing for https://en.wikipedia.org/wiki/Pok%C3%A9mon (NOT REQUIRED, BUT HELPFUL) "
+    },
+    {
+      "question_id": "650",
+      "wikipedia_url": "https://en.wikipedia.org/wiki/Category:Summer_Olympics_in_London",
+      "error": "Wikipedia page has no extract for https://en.wikipedia.org/wiki/Category:Summer_Olympics_in_London"
+    },
+    {
+      "question_id": "764",
+      "wikipedia_url": "https://en.wikipedia.org/wiki/2021_French_Open_%E2%80%93_Men%2527s_singles",
+      "error": "Wikipedia page has no extract for https://en.wikipedia.org/wiki/2021_French_Open_%E2%80%93_Men%2527s_singles"
+    }
+  ]
+}

@@ -4,15 +4,27 @@ benchmark:
   question_limit: 25
   frames:
     split: test
-    mapping_path: ./frames_mapping.json
-    local_corpus_dir: ./frames_corpus
+    mapping_path: data/frames-smoke/frames_mapping.json
+    local_corpus_dir: data/frames-smoke/corpus
 ragflow:
   base_url: http://127.0.0.1:80
   api_key_env_var: RAGFLOW_API_KEY
   llm_id_env_var: RAGFLOW_LLM_ID
 dataset:
   strategy: reuse_existing_dataset
-  dataset_id: replace-with-existing-dataset-id
+  dataset_id: 879b4e4c6ada11f19770634e43a5cd6f
+  name: null
+  embedding_model: null
+  chunk_method: naive
+  parser_config:
+    chunk_token_num: 512
+    delimiter: '
+
+      '
+    raptor:
+      use_raptor: false
+    graphrag:
+      use_graphrag: false
 retrieval:
   top_k: 128
   page_size: 20
@@ -27,4 +39,4 @@ chat:
   quote: true
   refine_multiturn: false
 output:
-  output_dir: outputs/frames_smoke_example
+  output_dir: outputs/frames_smoke_<timestamp>
