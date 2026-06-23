@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 import re
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any, Literal
 
@@ -205,16 +207,43 @@ def _download_hf_file(*, repo_path: str, local_dir: Path, refresh: bool, token: 
             token=token,
         )
     except (LocalEntryNotFoundError, OfflineModeIsEnabled, HfHubHTTPError, OSError) as exc:
-        raise ERAGBDownloadError(
-            "EnterpriseRAG-Bench file exists on Hugging Face but could not be downloaded. "
-            f"Dataset: {ERAGB_DATASET_ID}. File: {repo_path}. Local target: {target}. "
-            "Check Hugging Face connectivity/access, set HF_TOKEN if needed, or unset HF_HUB_OFFLINE. "
-            f"Original error: {type(exc).__name__}: {exc}"
-        ) from exc
+        try:
+            return _download_hf_file_via_resolve_url(repo_path=repo_path, target=target, token=token)
+        except Exception as fallback_exc:
+            raise ERAGBDownloadError(
+                "EnterpriseRAG-Bench file exists on Hugging Face but could not be downloaded. "
+                f"Dataset: {ERAGB_DATASET_ID}. File: {repo_path}. Local target: {target}. "
+                "The Hugging Face hub client failed, and the direct resolve-url fallback also failed. "
+                "Check access to huggingface.co and the signed CDN URL, set HF_TOKEN if needed, or unset HF_HUB_OFFLINE. "
+                f"Hub client error: {type(exc).__name__}: {exc}. "
+                f"Fallback error: {type(fallback_exc).__name__}: {fallback_exc}"
+            ) from fallback_exc
     downloaded_path = Path(downloaded)
     if downloaded_path != target and downloaded_path.exists():
         target.write_bytes(downloaded_path.read_bytes())
     return target
+
+
+def _download_hf_file_via_resolve_url(*, repo_path: str, target: Path, token: str | None) -> Path:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp_target = target.with_name(f"{target.name}.tmp")
+    url = f"https://huggingface.co/datasets/{ERAGB_DATASET_ID}/resolve/main/{repo_path}"
+    headers = {"User-Agent": "ragflow-bench"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response, tmp_target.open("wb") as output:
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                output.write(chunk)
+        tmp_target.replace(target)
+        return target
+    except (urllib.error.URLError, TimeoutError, OSError):
+        tmp_target.unlink(missing_ok=True)
+        raise
 
 
 def _write_document_corpus(df: pd.DataFrame, corpus_dir: Path) -> dict[str, Any]:

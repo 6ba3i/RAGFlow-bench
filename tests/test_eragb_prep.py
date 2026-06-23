@@ -3,7 +3,7 @@ import pandas as pd
 import pytest
 from huggingface_hub.errors import LocalEntryNotFoundError
 
-from ragflow_bench.benchmarks.eragb_prep import ERAGBDownloadError, prepare_eragb_artifacts
+from ragflow_bench.benchmarks.eragb_prep import ERAGBDownloadError, _download_hf_file, prepare_eragb_artifacts
 from ragflow_bench.benchmarks.enterprise_rag_bench import EnterpriseRAGBenchAdapter
 from ragflow_bench.config import AppConfig, BenchmarkConfig, BenchmarkKind, BenchmarkMode, DatasetConfig, DatasetStrategy
 
@@ -262,7 +262,11 @@ def test_prepare_eragb_reports_download_failure_after_path_verification(tmp_path
     def fail_download(**kwargs):
         raise LocalEntryNotFoundError("no local entry after verified repo path")
 
+    def fail_resolve_download(**kwargs):
+        raise OSError("resolve fallback failed")
+
     monkeypatch.setattr("ragflow_bench.benchmarks.eragb_prep.hf_hub_download", fail_download)
+    monkeypatch.setattr("ragflow_bench.benchmarks.eragb_prep._download_hf_file_via_resolve_url", fail_resolve_download)
 
     with pytest.raises(ERAGBDownloadError) as exc_info:
         prepare_eragb_artifacts(output_dir=tmp_path / "eragb")
@@ -272,6 +276,43 @@ def test_prepare_eragb_reports_download_failure_after_path_verification(tmp_path
     assert "Dataset: onyx-dot-app/EnterpriseRAG-Bench" in message
     assert "File: data/documents/test.parquet" in message
     assert str(tmp_path / "eragb" / "raw" / "documents" / "test.parquet") in message
+
+
+def test_download_hf_file_falls_back_to_resolve_url(tmp_path, monkeypatch):
+    def fail_hub_download(**kwargs):
+        raise LocalEntryNotFoundError("hub client could not resolve local entry")
+
+    def fake_resolve_download(*, repo_path, target, token):
+        assert repo_path == "data/documents/test.parquet"
+        assert token == "hf_test"
+        target.write_bytes(b"parquet-bytes")
+        return target
+
+    monkeypatch.setattr("ragflow_bench.benchmarks.eragb_prep.hf_hub_download", fail_hub_download)
+    monkeypatch.setattr("ragflow_bench.benchmarks.eragb_prep._download_hf_file_via_resolve_url", fake_resolve_download)
+
+    downloaded = _download_hf_file(repo_path="data/documents/test.parquet", local_dir=tmp_path, refresh=False, token="hf_test")
+
+    assert downloaded == tmp_path / "test.parquet"
+    assert downloaded.read_bytes() == b"parquet-bytes"
+
+
+def test_download_hf_file_reports_hub_and_fallback_errors(tmp_path, monkeypatch):
+    def fail_hub_download(**kwargs):
+        raise LocalEntryNotFoundError("hub failed")
+
+    def fail_resolve_download(**kwargs):
+        raise OSError("fallback failed")
+
+    monkeypatch.setattr("ragflow_bench.benchmarks.eragb_prep.hf_hub_download", fail_hub_download)
+    monkeypatch.setattr("ragflow_bench.benchmarks.eragb_prep._download_hf_file_via_resolve_url", fail_resolve_download)
+
+    with pytest.raises(ERAGBDownloadError) as exc_info:
+        _download_hf_file(repo_path="data/documents/test.parquet", local_dir=tmp_path, refresh=False, token=None)
+
+    message = str(exc_info.value)
+    assert "Hub client error: LocalEntryNotFoundError: hub failed" in message
+    assert "Fallback error: OSError: fallback failed" in message
 
 
 def test_prepare_eragb_rejects_shard_references_without_merge(tmp_path):
