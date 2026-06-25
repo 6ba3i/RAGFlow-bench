@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import random
 import time
 from pathlib import Path
 from uuid import uuid4
@@ -13,9 +14,28 @@ from ragflow_bench.execution.retrieval_runner import run_retrieval
 from ragflow_bench.ingestion.document_registry import DocumentRegistry
 from ragflow_bench.ingestion.ingest import ingest_documents, resolve_dataset_id
 from ragflow_bench.logging_utils import ProgressCallback, emit_progress
+from ragflow_bench.rate_limits import run_with_rate_limit_retries
 from ragflow_bench.reports.summary import build_summary
 from ragflow_bench.reports.writers import append_jsonl, jsonl_to_csv, write_json
 from ragflow_bench.scoring import classify_failure, exact_match, normalized_match, source_recall
+
+QUESTION_DELAY_MIN_SECONDS = 5.0
+QUESTION_DELAY_MAX_SECONDS = 10.0
+
+
+def _sleep_between_questions() -> float:
+    delay = random.uniform(QUESTION_DELAY_MIN_SECONDS, QUESTION_DELAY_MAX_SECONDS)
+    time.sleep(delay)
+    return delay
+
+
+def _chat_result_rate_limit_reason(raw_response: dict) -> str | None:
+    answer = raw_response.get("answer") or raw_response.get("content") or raw_response.get("data", {}).get("answer")
+    if isinstance(answer, str) and "ratelimiterror" in answer.lower():
+        return answer
+    if isinstance(answer, str) and "rate limited" in answer.lower():
+        return answer
+    return None
 
 
 def make_adapter(config: AppConfig) -> BenchmarkAdapter:
@@ -80,7 +100,12 @@ def run_benchmark(config: AppConfig, client, question_ids: set[str] | None = Non
         try:
             retrieval_started = time.monotonic()
             emit_progress(progress_callback, {"command": "run", "step": "retrieval", "status": "start", "index": index, "total": len(questions), "question_id": question.id, "dataset_id": dataset_id})
-            raw_retrieval = run_retrieval(client, config, dataset_id, question)
+            raw_retrieval = run_with_rate_limit_retries(
+                lambda: run_retrieval(client, config, dataset_id, question),
+                action_type="retrieval",
+                question_id=str(question.id),
+                progress_callback=progress_callback,
+            )
             emit_progress(progress_callback, {"command": "run", "step": "retrieval", "status": "ok", "index": index, "total": len(questions), "question_id": question.id, "count": len(raw_retrieval.get("chunks", [])) if isinstance(raw_retrieval, dict) else None, "elapsed_seconds": time.monotonic() - retrieval_started})
             session_id = None
             if chat:
@@ -92,7 +117,13 @@ def run_benchmark(config: AppConfig, client, question_ids: set[str] | None = Non
                     emit_progress(progress_callback, {"command": "run", "step": "session_create", "status": "ok", "question_id": question.id, "chat_id": chat.get("id"), "session_id": session_id, "elapsed_seconds": time.monotonic() - session_started})
                 chat_started = time.monotonic()
                 emit_progress(progress_callback, {"command": "run", "step": "chat", "status": "start", "index": index, "total": len(questions), "question_id": question.id, "chat_id": chat.get("id"), "session_id": session_id})
-                raw_response = run_chat(client, config, chat["id"], question, session_id=session_id)
+                raw_response = run_with_rate_limit_retries(
+                    lambda: run_chat(client, config, chat["id"], question, session_id=session_id),
+                    action_type="chat",
+                    question_id=str(question.id),
+                    progress_callback=progress_callback,
+                    should_retry_result=_chat_result_rate_limit_reason,
+                )
                 ragflow_answer = raw_response.get("answer") or raw_response.get("content") or raw_response.get("data", {}).get("answer")
                 emit_progress(progress_callback, {"command": "run", "step": "chat", "status": "ok", "index": index, "total": len(questions), "question_id": question.id, "chat_id": chat.get("id"), "session_id": session_id, "elapsed_seconds": time.monotonic() - chat_started})
         except Exception as exc:  # noqa: BLE001
@@ -142,6 +173,9 @@ def run_benchmark(config: AppConfig, client, question_ids: set[str] | None = Non
         append_jsonl(results_path, row)
         rows.append(row)
         emit_progress(progress_callback, {"command": "run", "step": "row_write", "status": "ok", "index": index, "total": len(questions), "question_id": question.id, "path": str(results_path), "elapsed_seconds": time.monotonic() - q_started})
+        if index < len(questions):
+            delay = _sleep_between_questions()
+            emit_progress(progress_callback, {"command": "run", "step": "question_delay", "status": "ok", "index": index, "total": len(questions), "question_id": question.id, "delay": delay})
     jsonl_to_csv(results_path, output_dir / "results.csv")
     emit_progress(progress_callback, {"command": "run", "step": "csv_write", "status": "ok", "path": str(output_dir / "results.csv")})
     write_json(output_dir / "summary.json", build_summary(benchmark=config.benchmark.kind.value, mode=config.benchmark.mode.value, rows=rows))

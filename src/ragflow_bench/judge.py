@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import random
 import sys
 import time
 from collections import Counter
@@ -11,6 +12,7 @@ import requests
 
 from ragflow_bench.config import JudgeSettings
 from ragflow_bench.logging_utils import redact_text
+from ragflow_bench.rate_limits import run_with_rate_limit_retries
 from ragflow_bench.ragflow.errors import RagflowAPIError, RagflowConfigError
 from ragflow_bench.reports.writers import jsonl_to_csv, write_json
 
@@ -32,6 +34,8 @@ SCORE_TO_VERDICT = {
     2: "partial",
     0: "incorrect",
 }
+QUESTION_DELAY_MIN_SECONDS = 5.0
+QUESTION_DELAY_MAX_SECONDS = 10.0
 
 
 def is_excluded_infra_error(row: dict[str, Any]) -> bool:
@@ -141,6 +145,7 @@ class ZhipuJudgeClient:
         self.backoff_seconds = settings.resolved_backoff_seconds()
         self.max_backoff_seconds = settings.resolved_max_backoff_seconds()
         self.session = requests.Session()
+        self.progress_callback = None
         if not self.base_url:
             raise RagflowConfigError("Judge base URL is required")
         if not self.api_key:
@@ -171,9 +176,7 @@ class ZhipuJudgeClient:
             callback(event)
 
     def _post_with_retries(self, payload: dict[str, Any], *, question_id: str | None = None) -> requests.Response:
-        last_error: Exception | None = None
-        max_attempts = self.max_retries + 1
-        for attempt in range(1, max_attempts + 1):
+        def _request_once() -> requests.Response:
             started = time.monotonic()
             try:
                 response = self.session.post(
@@ -187,66 +190,49 @@ class ZhipuJudgeClient:
                 )
             except requests.ReadTimeout as exc:
                 elapsed = time.monotonic() - started
-                last_error = exc
-                retry = attempt <= self.max_retries
-                delay = self._backoff_delay(attempt) if retry else None
                 self._emit_log({
                     "type": "judge_request",
                     "question_id": question_id,
-                    "attempt": attempt,
-                    "max_attempts": max_attempts,
                     "exception": exc.__class__.__name__,
-                    "error": str(exc),
-                    "retry": retry,
-                    "delay": delay,
+                    "retry": False,
                     "elapsed_seconds": elapsed,
+                    "error": str(exc),
                 })
-                if not retry:
-                    raise
-                time.sleep(delay or 0.0)
-                continue
-
+                raise
             elapsed = time.monotonic() - started
             if response.status_code < 400:
                 self._emit_log({
                     "type": "judge_request",
                     "question_id": question_id,
-                    "attempt": attempt,
-                    "max_attempts": max_attempts,
                     "status_code": response.status_code,
                     "retry": False,
                     "elapsed_seconds": elapsed,
                 })
                 return response
-
             error = RagflowAPIError(
                 f"Judge HTTP {response.status_code}",
                 status_code=response.status_code,
                 url=f"{self.base_url}/chat/completions",
                 raw_body=redact_text(response.text, [self.api_key]),
             )
-            retry = attempt <= self.max_retries and self._should_retry_http(response.status_code)
-            delay = self._backoff_delay(attempt, response) if retry else None
             self._emit_log({
                 "type": "judge_request",
                 "question_id": question_id,
-                "attempt": attempt,
-                "max_attempts": max_attempts,
                 "status_code": response.status_code,
+                "retry": False,
+                "elapsed_seconds": elapsed,
                 "error": str(error),
                 "raw_body": redact_text(response.text, [self.api_key]),
-                "retry": retry,
-                "delay": delay,
-                "elapsed_seconds": elapsed,
             })
-            if not retry:
-                raise error
-            last_error = error
-            time.sleep(delay or 0.0)
+            raise error
 
-        if last_error:
-            raise last_error
-        raise RuntimeError("Judge request retry loop ended unexpectedly")
+        response = run_with_rate_limit_retries(
+            _request_once,
+            action_type="judge",
+            question_id=question_id,
+            progress_callback=self.progress_callback,
+        )
+        return response
 
     def judge_row(self, row: dict[str, Any]) -> dict[str, Any]:
         if is_excluded_infra_error(row):
@@ -366,6 +352,12 @@ def _emit_progress(progress_callback: Callable[[dict[str, Any]], None] | None, e
         progress_callback(event)
 
 
+def _sleep_between_judge_rows() -> float:
+    delay = random.uniform(QUESTION_DELAY_MIN_SECONDS, QUESTION_DELAY_MAX_SECONDS)
+    time.sleep(delay)
+    return delay
+
+
 def _row_resume_key(row: dict[str, Any], index: int) -> str:
     question_id = row.get("question_id")
     if question_id is None or str(question_id) == "":
@@ -454,6 +446,15 @@ def judge_results_file(
                         "excluded_count": sum(1 for item in judged_by_id.values() if item.get("judge_excluded")),
                         "elapsed_seconds": time.monotonic() - started,
                     })
+                    if index < len(rows):
+                        delay = _sleep_between_judge_rows()
+                        _emit_progress(progress_callback, {
+                            "type": "judge_row_delay",
+                            "index": index,
+                            "total": len(rows),
+                            "question_id": question_id,
+                            "delay": delay,
+                        })
                     continue
 
                 try:
@@ -480,6 +481,15 @@ def judge_results_file(
                     "excluded_count": sum(1 for item in judged_by_id.values() if item.get("judge_excluded")),
                     "elapsed_seconds": time.monotonic() - started,
                 })
+                if index < len(rows):
+                    delay = _sleep_between_judge_rows()
+                    _emit_progress(progress_callback, {
+                        "type": "judge_row_delay",
+                        "index": index,
+                        "total": len(rows),
+                        "question_id": question_id,
+                        "delay": delay,
+                    })
     finally:
         client.progress_callback = previous_callback
 

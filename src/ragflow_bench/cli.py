@@ -51,6 +51,24 @@ def _row_needs_retry(row: dict) -> bool:
     return bool(row.get("error")) or is_excluded_infra_error(row)
 
 
+def _auto_judge_run_dir(run_dir: str | Path, *, resume: bool = True) -> dict:
+    run_path = Path(run_dir)
+    results_path = run_path / "results.jsonl"
+    config_path = run_path / "config.resolved.yaml"
+    if not results_path.exists():
+        raise FileNotFoundError(f"Missing results file: {results_path}")
+    if not config_path.exists():
+        raise FileNotFoundError(f"Missing resolved config: {config_path}")
+    cfg = _unredact_config_for_retry(load_config(config_path))
+    return judge_results_file(
+        results_path=results_path,
+        client=ZhipuJudgeClient(cfg.judge),
+        output_path=run_path / "judge_results.jsonl",
+        resume=resume,
+        progress_callback=judge_progress_printer,
+    )
+
+
 def _merge_retry_rows(original_rows: list[dict], retry_rows: list[dict]) -> tuple[list[dict], int]:
     original_ids = [str(row.get("question_id")) for row in original_rows]
     original_id_set = set(original_ids)
@@ -114,6 +132,7 @@ def wizard() -> None:
         cfg = load_config(target)
         _exit_if_local_paths_missing(cfg)
         output_dir = run_benchmark(cfg, RagflowClient(cfg.ragflow), progress_callback=default_progress_printer)
+        _auto_judge_run_dir(output_dir)
         console.print(f"Run completed: {output_dir}")
     emit_progress(default_progress_printer, {"command": "wizard", "step": "complete", "status": "ok", "path": str(target)})
 
@@ -371,6 +390,7 @@ def run(config: str = typer.Option(..., help="Config YAML path")) -> None:
     emit_progress(default_progress_printer, {"command": "run", "step": "config_load", "status": "ok", "path": config})
     _exit_if_local_paths_missing(cfg)
     output_dir = run_benchmark(cfg, RagflowClient(cfg.ragflow), progress_callback=default_progress_printer)
+    _auto_judge_run_dir(output_dir)
     console.print(f"Run completed: {output_dir}")
 
 
@@ -418,6 +438,7 @@ def retry_failed(run_dir: str = typer.Option(..., help="Existing run directory c
     summary = build_summary(benchmark=merged_rows[0].get("benchmark", "") if merged_rows else "", mode=cfg.benchmark.mode.value, rows=merged_rows)
     write_json(run_path / "summary.json", summary)
     emit_progress(default_progress_printer, {"command": "retry-failed", "step": "summary_write", "status": "ok", "path": str(run_path / "summary.json")})
+    _auto_judge_run_dir(run_path, resume=False)
 
     successful_retries = sum(1 for row in retry_rows if not _row_needs_retry(row))
     remaining_errors = sum(1 for row in merged_rows if _row_needs_retry(row))
