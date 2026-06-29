@@ -12,7 +12,6 @@ import requests
 
 from ragflow_bench.config import JudgeSettings
 from ragflow_bench.logging_utils import redact_text
-from ragflow_bench.rate_limits import run_with_rate_limit_retries
 from ragflow_bench.ragflow.errors import RagflowAPIError, RagflowConfigError
 from ragflow_bench.reports.writers import jsonl_to_csv, write_json, write_jsonl
 
@@ -115,6 +114,8 @@ def summarize_judged_rows(*, rows: list[dict[str, Any]], model: str) -> dict[str
     verdict_counts = Counter(row.get("judge_verdict", "") for row in rows)
     confidences = [float(row["judge_confidence"]) for row in scorable_rows if isinstance(row.get("judge_confidence"), (int, float))]
     strict_accuracy = strict / scorable if scorable else 0.0
+    exclusion_by_source_type = _exclusion_breakdown(rows, "source_types")
+    exclusion_by_reasoning_type = _exclusion_breakdown(rows, "reasoning_types")
     return {
         "judge_provider": "zhipu",
         "judge_model": model,
@@ -131,7 +132,23 @@ def summarize_judged_rows(*, rows: list[dict[str, Any]], model: str) -> dict[str
         "judge_score_counts": dict(score_counts),
         "judge_verdict_counts": dict(verdict_counts),
         "average_judge_confidence": (sum(confidences) / len(confidences) if confidences else None),
+        "exclusion_by_source_type": exclusion_by_source_type,
+        "exclusion_by_reasoning_type": exclusion_by_reasoning_type,
     }
+
+
+def _exclusion_breakdown(rows: list[dict[str, Any]], key: str) -> dict[str, dict[str, int]]:
+    breakdown: dict[str, Counter] = {}
+    for row in rows:
+        values = row.get(key) or ["unknown"]
+        if not isinstance(values, list):
+            values = [values]
+        reason = row.get("judge_exclusion_reason") if row.get("judge_excluded") else "scorable"
+        for value in values or ["unknown"]:
+            name = str(value or "unknown")
+            breakdown.setdefault(name, Counter())[str(reason or "unknown")] += 1
+    return {name: dict(counter) for name, counter in sorted(breakdown.items())}
+
 
 class ZhipuJudgeClient:
     def __init__(self, settings: JudgeSettings, timeout: int | None = None):
@@ -153,7 +170,7 @@ class ZhipuJudgeClient:
         if not self.model:
             raise RagflowConfigError("Judge model is required")
 
-    def _backoff_delay(self, attempt: int, response: requests.Response | None = None) -> float:
+    def _backoff_delay(self, response: requests.Response | None = None) -> float:
         retry_after = None
         if response is not None:
             retry_after = response.headers.get("Retry-After")
@@ -176,8 +193,11 @@ class ZhipuJudgeClient:
             callback(event)
 
     def _post_with_retries(self, payload: dict[str, Any], *, question_id: str | None = None) -> requests.Response:
-        def _request_once() -> requests.Response:
+        max_attempts = self.max_retries + 1
+        last_error: Exception | None = None
+        for attempt in range(1, max_attempts + 1):
             started = time.monotonic()
+            response: requests.Response | None = None
             try:
                 response = self.session.post(
                     f"{self.base_url}/chat/completions",
@@ -188,51 +208,68 @@ class ZhipuJudgeClient:
                     json=payload,
                     timeout=self.timeout,
                 )
-            except requests.ReadTimeout as exc:
                 elapsed = time.monotonic() - started
-                self._emit_log({
-                    "type": "judge_request",
-                    "question_id": question_id,
-                    "exception": exc.__class__.__name__,
-                    "retry": False,
-                    "elapsed_seconds": elapsed,
-                    "error": str(exc),
-                })
-                raise
-            elapsed = time.monotonic() - started
-            if response.status_code < 400:
-                self._emit_log({
-                    "type": "judge_request",
-                    "question_id": question_id,
-                    "status_code": response.status_code,
-                    "retry": False,
-                    "elapsed_seconds": elapsed,
-                })
-                return response
-            error = RagflowAPIError(
-                f"Judge HTTP {response.status_code}",
-                status_code=response.status_code,
-                url=f"{self.base_url}/chat/completions",
-                raw_body=redact_text(response.text, [self.api_key]),
-            )
+                if response.status_code < 400:
+                    self._emit_log({
+                        "type": "judge_request",
+                        "question_id": question_id,
+                        "attempt": attempt,
+                        "max_attempts": max_attempts,
+                        "status_code": response.status_code,
+                        "retry": False,
+                        "elapsed_seconds": elapsed,
+                    })
+                    return response
+                error = RagflowAPIError(
+                    f"Judge HTTP {response.status_code}",
+                    status_code=response.status_code,
+                    url=f"{self.base_url}/chat/completions",
+                    raw_body=redact_text(response.text, [self.api_key]),
+                )
+                if not self._should_retry_http(response.status_code):
+                    raise error
+                last_error = error
+            except (requests.ReadTimeout, requests.ConnectionError, requests.Timeout) as exc:
+                elapsed = time.monotonic() - started
+                last_error = exc
+            except RagflowAPIError as exc:
+                elapsed = time.monotonic() - started
+                last_error = exc
+                if not self._should_retry_http(exc.status_code):
+                    self._emit_log({
+                        "type": "judge_request",
+                        "question_id": question_id,
+                        "attempt": attempt,
+                        "max_attempts": max_attempts,
+                        "status_code": exc.status_code,
+                        "retry": False,
+                        "elapsed_seconds": elapsed,
+                        "error": str(exc),
+                    })
+                    raise
+            retry = attempt < max_attempts
+            delay = None
+            if retry:
+                delay = min(self.backoff_seconds * (2 ** (attempt - 1)), self.max_backoff_seconds)
+                if response is not None and response.status_code == 429:
+                    delay = self._backoff_delay(response)
+                time.sleep(delay)
             self._emit_log({
                 "type": "judge_request",
                 "question_id": question_id,
-                "status_code": response.status_code,
-                "retry": False,
+                "attempt": attempt,
+                "max_attempts": max_attempts,
+                "status_code": getattr(response, "status_code", None),
+                "exception": last_error.__class__.__name__ if last_error else None,
+                "retry": retry,
+                "delay": delay,
                 "elapsed_seconds": elapsed,
-                "error": str(error),
-                "raw_body": redact_text(response.text, [self.api_key]),
+                "error": str(last_error) if last_error else None,
+                "raw_body": redact_text(response.text, [self.api_key]) if response is not None else None,
             })
-            raise error
-
-        response = run_with_rate_limit_retries(
-            _request_once,
-            action_type="judge",
-            question_id=question_id,
-            progress_callback=self.progress_callback,
-        )
-        return response
+            if not retry and last_error is not None:
+                raise last_error
+        raise RuntimeError("Judge retry loop ended unexpectedly")
 
     def judge_row(self, row: dict[str, Any]) -> dict[str, Any]:
         if is_excluded_infra_error(row):
@@ -293,6 +330,8 @@ class ZhipuJudgeClient:
             "missing_or_wrong_facts": _string_list(parsed.get("missing_or_wrong_facts")),
             "excluded": False,
             "exclusion_reason": None,
+            "raw_response": body,
+            "raw_content": content,
         }
 
 
@@ -316,6 +355,10 @@ def _make_judged_row(row: dict[str, Any], *, client: ZhipuJudgeClient, verdict: 
     judged["judge_excluded"] = verdict["excluded"]
     judged["judge_exclusion_reason"] = verdict["exclusion_reason"]
     judged["judge_correct"] = verdict["score"] == 4
+    if "raw_response" in verdict:
+        judged["judge_raw_response"] = verdict.get("raw_response")
+    if "raw_content" in verdict:
+        judged["judge_raw_content"] = verdict.get("raw_content")
     return judged
 
 

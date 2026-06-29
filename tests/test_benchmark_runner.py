@@ -67,7 +67,7 @@ def test_run_benchmark_promotes_error_answers_to_error_field(tmp_path, monkeypat
 
     row = load_jsonl(output_dir / "results.jsonl")[0]
     assert row["error"] == "**ERROR**: GENERIC_ERROR - litellm.RateLimitError: rate limited"
-    assert row["failure_type"] == "error"
+    assert row["failure_type"] == "answer_generation_error"
 
 
 def test_run_benchmark_emits_chat_progress(tmp_path, monkeypatch):
@@ -172,4 +172,73 @@ def test_run_benchmark_exhausts_rate_limit_retries_and_records_error(tmp_path, m
     row = load_jsonl(output_dir / "results.jsonl")[0]
     assert delays == [18.0, 18.0]
     assert "HTTP 429" in row["error"]
-    assert row["failure_type"] == "error"
+    assert row["failure_type"] == "answer_generation_error"
+
+
+def test_audit_chunk_preserves_diagnostic_fields():
+    from ragflow_bench.execution.benchmark_runner import audit_chunk
+
+    chunk = {
+        "id": "chunk1",
+        "doc_id": "doc1",
+        "document_name": "github_shard_000104.txt",
+        "score": 0.9,
+        "term_similarity": 0.7,
+        "vector_similarity": 0.8,
+        "positions": [[1, 2]],
+        "metadata": {"source_uri": "src"},
+    }
+
+    audited = audit_chunk(chunk, rank=3, survived_final_context=True)
+
+    assert audited["rank"] == 3
+    assert audited["chunk_id"] == "chunk1"
+    assert audited["document_name"] == "github_shard_000104.txt"
+    assert audited["score"] == 0.9
+    assert audited["term_similarity"] == 0.7
+    assert audited["vector_similarity"] == 0.8
+    assert audited["positions"] == [[1, 2]]
+    assert audited["metadata"] == {"source_uri": "src"}
+    assert audited["survived_final_context"] is True
+
+
+def test_run_benchmark_persists_raw_and_final_context_diagnostics(tmp_path, monkeypatch):
+    cfg = _config(tmp_path)
+    cfg.ragflow.llm_id = "model"
+    monkeypatch.setattr(benchmark_runner, "make_adapter", lambda cfg: _Adapter())
+    monkeypatch.setattr(
+        benchmark_runner,
+        "run_retrieval",
+        lambda client, cfg, dataset_id, question: {"chunks": [{"id": "raw1", "document_name": "source-2", "similarity": 0.9}]},
+    )
+    monkeypatch.setattr(benchmark_runner, "ensure_chat", lambda client, cfg, dataset_id, name: {"id": "chat1"})
+    monkeypatch.setattr(
+        benchmark_runner,
+        "run_chat",
+        lambda client, cfg, chat_id, question, session_id=None: {"answer": "Answer 2 [ID:0]", "reference": {"chunks": [{"id": "raw1", "document_name": "source-2"}]}},
+    )
+
+    output_dir = benchmark_runner.run_benchmark(cfg, _Client(), question_ids={"2"})
+
+    row = load_jsonl(output_dir / "results.jsonl")[0]
+    assert row["raw_retrieval_chunks"][0]["rank"] == 1
+    assert row["final_context_chunks"][0]["chunk_id"] == "raw1"
+    assert row["citation_chunk_ids"] == ["raw1"]
+    assert row["prompt_chunk_count"] == 1
+    assert row["chat_top_n"] == cfg.chat.top_n
+    assert row["retrieval_page_size"] == cfg.retrieval.page_size
+
+
+def test_exact_fact_prompt_mode_adds_prompt_without_budget_changes(tmp_path):
+    from ragflow_bench.execution.chat_runner import build_prompt_config, EXACT_FACT_PROMPT
+
+    cfg = _config(tmp_path)
+    default_prompt = build_prompt_config(cfg)
+    assert "system" not in default_prompt
+    top_n = cfg.chat.top_n
+    max_tokens = cfg.chat.max_tokens
+    cfg.chat.prompt_mode = "exact_fact"
+    exact_prompt = build_prompt_config(cfg)
+    assert EXACT_FACT_PROMPT in exact_prompt["system"]
+    assert cfg.chat.top_n == top_n
+    assert cfg.chat.max_tokens == max_tokens

@@ -142,7 +142,7 @@ class RagflowClient:
             time.sleep(poll_interval)
         raise RagflowAPIError(f"Timed out waiting for documents to parse in dataset {dataset_id}", raw_body=json.dumps(latest))
 
-    def create_chat(self, *, name: str, dataset_ids: list[str], llm_id: str, prompt_config: dict[str, Any] | None = None, top_n: int = 8, top_k: int = 128, similarity_threshold: float = 0.05, vector_similarity_weight: float = 0.3) -> dict[str, Any]:
+    def create_chat(self, *, name: str, dataset_ids: list[str], llm_id: str, prompt_config: dict[str, Any] | None = None, top_n: int = 8, top_k: int = 128, similarity_threshold: float = 0.05, vector_similarity_weight: float = 0.3, rerank_id: str | None = None) -> dict[str, Any]:
         body: dict[str, Any] = {
             "name": name,
             "dataset_ids": dataset_ids,
@@ -154,6 +154,8 @@ class RagflowClient:
         }
         if prompt_config is not None:
             body["prompt_config"] = prompt_config
+        if rerank_id:
+            body["rerank_id"] = rerank_id
         payload = self._request("POST", "/api/v1/chats", json=body)
         return payload.get("data", {})
 
@@ -161,7 +163,7 @@ class RagflowClient:
         payload = self._request("POST", f"/api/v1/chats/{chat_id}/sessions", json={"name": name})
         return payload.get("data", {})
 
-    def retrieve(self, *, question: str, dataset_ids: list[str] | None = None, document_ids: list[str] | None = None, page_size: int = 20, similarity_threshold: float = 0.05, vector_similarity_weight: float = 0.3, top_k: int = 128) -> dict[str, Any]:
+    def retrieve(self, *, question: str, dataset_ids: list[str] | None = None, document_ids: list[str] | None = None, page_size: int = 20, similarity_threshold: float = 0.05, vector_similarity_weight: float = 0.3, top_k: int = 128, rerank_id: str | None = None) -> dict[str, Any]:
         body: dict[str, Any] = {
             "question": question,
             "page_size": page_size,
@@ -173,6 +175,8 @@ class RagflowClient:
             body["dataset_ids"] = dataset_ids
         if document_ids:
             body["document_ids"] = document_ids
+        if rerank_id:
+            body["rerank_id"] = rerank_id
         payload = self._request("POST", "/api/v1/retrieval", json=body)
         return payload.get("data", {})
 

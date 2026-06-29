@@ -43,6 +43,7 @@ class RetrievalSettings(BaseModel):
     page_size: int = 20
     similarity_threshold: float = 0.05
     vector_similarity_weight: float = 0.3
+    rerank_id: str | None = None
 
 
 class ChatSettings(BaseModel):
@@ -53,6 +54,13 @@ class ChatSettings(BaseModel):
     fresh_session_per_question: bool = True
     quote: bool = True
     refine_multiturn: bool = False
+    prompt_mode: str = "default"
+
+    @model_validator(mode="after")
+    def _validate_prompt_mode(self) -> "ChatSettings":
+        if self.prompt_mode not in {"default", "exact_fact"}:
+            raise ValueError("chat.prompt_mode must be one of: default, exact_fact")
+        return self
 
 
 class JudgeSettings(BaseModel):

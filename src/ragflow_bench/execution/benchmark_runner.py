@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 import time
 from pathlib import Path
 from uuid import uuid4
@@ -17,7 +18,7 @@ from ragflow_bench.logging_utils import ProgressCallback, emit_progress
 from ragflow_bench.rate_limits import run_with_rate_limit_retries
 from ragflow_bench.reports.summary import build_summary
 from ragflow_bench.reports.writers import append_jsonl, jsonl_to_csv, write_json
-from ragflow_bench.scoring import classify_failure, exact_match, normalized_match, source_recall
+from ragflow_bench.scoring import classify_failure, exact_match, normalized_match, retrieval_diagnostics, source_recall
 
 QUESTION_DELAY_MIN_SECONDS = 5.0
 QUESTION_DELAY_MAX_SECONDS = 10.0
@@ -36,6 +37,65 @@ def _chat_result_rate_limit_reason(raw_response: dict) -> str | None:
     if isinstance(answer, str) and "rate limited" in answer.lower():
         return answer
     return None
+
+
+def _chunk_id(chunk: dict) -> str | None:
+    value = chunk.get("chunk_id") or chunk.get("id")
+    return str(value) if value is not None else None
+
+
+def audit_chunk(chunk: dict, *, rank: int, survived_final_context: bool | None = None) -> dict:
+    return {
+        "rank": rank,
+        "chunk_id": _chunk_id(chunk),
+        "doc_id": chunk.get("doc_id"),
+        "document_id": chunk.get("document_id"),
+        "document_name": chunk.get("document_name"),
+        "document_keyword": chunk.get("document_keyword"),
+        "docnm_kwd": chunk.get("docnm_kwd"),
+        "source_uri": chunk.get("source_uri"),
+        "similarity": chunk.get("similarity"),
+        "score": chunk.get("score"),
+        "term_similarity": chunk.get("term_similarity"),
+        "vector_similarity": chunk.get("vector_similarity"),
+        "positions": chunk.get("positions"),
+        "metadata": chunk.get("metadata"),
+        "meta_fields": chunk.get("meta_fields"),
+        "document_metadata": chunk.get("document_metadata"),
+        "survived_final_context": survived_final_context,
+    }
+
+
+def audit_chunks(chunks: list[dict], *, final_chunk_ids: set[str] | None = None) -> list[dict]:
+    audited = []
+    for rank, chunk in enumerate(chunks, start=1):
+        if not isinstance(chunk, dict):
+            continue
+        chunk_id = _chunk_id(chunk)
+        survived = (chunk_id in final_chunk_ids) if final_chunk_ids is not None and chunk_id is not None else None
+        audited.append(audit_chunk(chunk, rank=rank, survived_final_context=survived))
+    return audited
+
+
+def final_context_chunks_from_response(raw_response: dict) -> list[dict]:
+    if not isinstance(raw_response, dict):
+        return []
+    reference = raw_response.get("reference") or raw_response.get("data", {}).get("reference") or {}
+    chunks = reference.get("chunks", []) if isinstance(reference, dict) else []
+    return chunks if isinstance(chunks, list) else []
+
+
+def citation_chunk_ids(answer: str | None, final_chunks: list[dict]) -> list[str]:
+    if not isinstance(answer, str):
+        return []
+    ids: list[str] = []
+    for marker in re.findall(r"\[ID:(\d+)\]", answer):
+        index = int(marker)
+        if 0 <= index < len(final_chunks) and isinstance(final_chunks[index], dict):
+            chunk_id = _chunk_id(final_chunks[index])
+            if chunk_id and chunk_id not in ids:
+                ids.append(chunk_id)
+    return ids
 
 
 def make_adapter(config: AppConfig) -> BenchmarkAdapter:
@@ -133,21 +193,29 @@ def run_benchmark(config: AppConfig, client, question_ids: set[str] | None = Non
             error = ragflow_answer.strip()
 
         chunks = raw_retrieval.get("chunks", []) if isinstance(raw_retrieval, dict) else []
+        chunks = chunks if isinstance(chunks, list) else []
+        final_chunks = final_context_chunks_from_response(raw_response)
+        final_chunk_ids = {_chunk_id(chunk) for chunk in final_chunks if isinstance(chunk, dict) and _chunk_id(chunk)}
+        raw_retrieval_chunks = audit_chunks(chunks, final_chunk_ids=final_chunk_ids)
+        final_context_chunks = audit_chunks(final_chunks)
+        cited_chunk_ids = citation_chunk_ids(ragflow_answer, final_chunks)
         retrieved_document_ids = [chunk.get("doc_id") or chunk.get("document_id") for chunk in chunks if isinstance(chunk, dict)]
         retrieved_chunk_ids = [chunk.get("chunk_id") or chunk.get("id") for chunk in chunks if isinstance(chunk, dict)]
         retrieved_scores = [chunk.get("score") or chunk.get("similarity") for chunk in chunks if isinstance(chunk, dict)]
-        retrieved_source_uris = []
-        for chunk in chunks:
-            if not isinstance(chunk, dict):
-                continue
-            metadata = chunk.get("metadata") or chunk.get("meta_fields") or {}
-            source_uri = metadata.get("source_uri") or chunk.get("source_uri")
-            if source_uri:
-                retrieved_source_uris.append(source_uri)
+        raw_diag = retrieval_diagnostics(question.expected_sources, chunks, prefix="raw_retrieval")
+        final_diag = retrieval_diagnostics(question.expected_sources, final_chunks, prefix="final_context")
+        retrieved_source_uris = raw_diag["raw_retrieval_retrieved_source_uris"]
         em = exact_match(question.gold_answer, ragflow_answer)
         nm = normalized_match(question.gold_answer, ragflow_answer)
         recall = source_recall(question.expected_sources, retrieved_source_uris)
-        failure = classify_failure(error=error, ragflow_answer=ragflow_answer, exact_match=em, source_recall=recall)
+        failure = classify_failure(
+            error=error,
+            ragflow_answer=ragflow_answer,
+            exact_match=em,
+            source_recall=recall,
+            raw_retrieval_shard_recall=raw_diag["raw_retrieval_shard_recall"],
+            final_context_shard_recall=final_diag["final_context_shard_recall"],
+        )
         emit_progress(progress_callback, {"command": "run", "step": "score", "status": failure, "index": index, "total": len(questions), "question_id": question.id, "count": len(retrieved_source_uris)})
         row = {
             "benchmark": config.benchmark.kind.value,
@@ -164,6 +232,21 @@ def run_benchmark(config: AppConfig, client, question_ids: set[str] | None = Non
             "retrieved_chunk_ids": retrieved_chunk_ids,
             "retrieved_scores": retrieved_scores,
             "source_recall": recall,
+            "raw_retrieval_shard_recall@20": raw_diag["raw_retrieval_shard_recall"],
+            "raw_retrieval_expected_rank": raw_diag["raw_retrieval_expected_rank"],
+            "raw_retrieval_mrr": raw_diag["raw_retrieval_mrr"],
+            "final_context_shard_recall@top_n": final_diag["final_context_shard_recall"],
+            "final_context_expected_rank": final_diag["final_context_expected_rank"],
+            "final_context_mrr": final_diag["final_context_mrr"],
+            "retrieval_diagnostics": {**raw_diag, **final_diag},
+            "raw_retrieval_chunks": raw_retrieval_chunks,
+            "final_context_chunks": final_context_chunks,
+            "citation_chunk_ids": cited_chunk_ids,
+            "prompt_chunk_count": len(final_context_chunks),
+            "chat_top_n": config.chat.top_n,
+            "retrieval_page_size": config.retrieval.page_size,
+            "retrieval_rerank_id": config.retrieval.rerank_id,
+            "chat_prompt_mode": config.chat.prompt_mode,
             "reasoning_types": question.reasoning_types,
             "failure_type": failure,
             "raw_retrieval": raw_retrieval,

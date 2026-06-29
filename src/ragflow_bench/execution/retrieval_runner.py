@@ -13,4 +13,5 @@ def run_retrieval(client: RagflowClient, config: AppConfig, dataset_id: str, que
         similarity_threshold=config.retrieval.similarity_threshold,
         vector_similarity_weight=config.retrieval.vector_similarity_weight,
         top_k=config.retrieval.top_k,
+        rerank_id=config.retrieval.rerank_id,
     )

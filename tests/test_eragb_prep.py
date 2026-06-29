@@ -449,3 +449,34 @@ def test_prepare_eragb_rejects_shard_references_without_merge(tmp_path):
         assert "requires merge_documents" in str(exc)
     else:
         raise AssertionError("Expected validation failure")
+
+
+def test_prepare_eragb_preserves_source_specific_metadata(tmp_path, monkeypatch):
+    source_docs = tmp_path / "source_documents.parquet"
+    source_questions = tmp_path / "source_questions.parquet"
+    pd.DataFrame(
+        [
+            {"doc_id": "conf1", "source_type": "confluence", "title": "Conf", "content": "c", "page_title": "Page", "space": "ENG", "path": "/a", "heading_hierarchy": ["H1"]},
+            {"doc_id": "slack1", "source_type": "slack", "title": "Slack", "content": "s", "channel": "#eng", "thread_timestamp": "1", "message_timestamp": "2", "user": "u"},
+            {"doc_id": "fire1", "source_type": "fireflies", "title": "Fire", "content": "f", "meeting_title": "M", "date": "2026-01-01", "speaker": "Ada", "turn_index": 7},
+        ]
+    ).to_parquet(source_docs)
+    pd.DataFrame([{"question_id": "q", "question": "q", "expected_doc_ids": ["conf1"], "gold_answer": "a"}]).to_parquet(source_questions)
+    monkeypatch.setattr(
+        "ragflow_bench.benchmarks.eragb_prep.HfApi.list_repo_files",
+        lambda self, **kwargs: ["data/documents/test.parquet", "data/questions/test.parquet"],
+    )
+    monkeypatch.setattr(
+        "ragflow_bench.benchmarks.eragb_prep.hf_hub_download",
+        lambda **kwargs: str(source_docs if "documents" in kwargs["filename"] else source_questions),
+    )
+
+    prepare_eragb_artifacts(output_dir=tmp_path / "eragb", merge_documents=True, merge_max_docs=10)
+
+    manifest = json.loads((tmp_path / "eragb" / "documents_manifest.json").read_text(encoding="utf-8"))
+    all_docs = [doc for shard in manifest.values() for doc in shard["contained_documents"]]
+    by_id = {doc["id"]: doc for doc in all_docs}
+    assert by_id["conf1"]["metadata"]["space"] == "ENG"
+    assert by_id["slack1"]["metadata"]["channel"] == "#eng"
+    assert by_id["fire1"]["metadata"]["meeting_title"] == "M"
+    assert by_id["conf1"]["canonical_shard_uri"].startswith("eragb-shard://confluence/")

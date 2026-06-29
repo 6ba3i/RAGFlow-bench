@@ -263,10 +263,14 @@ def _write_document_corpus(df: pd.DataFrame, corpus_dir: Path) -> dict[str, Any]
         relative_path = path.relative_to(corpus_dir).as_posix()
         manifest[relative_path] = {
             "id": doc_id,
+            "original_document_id": doc_id,
+            "canonical_source_uri": doc_id,
             "source_uri": doc_id,
             "title": title,
+            "original_title": title,
             "source_type": source_type,
             "path": relative_path,
+            "metadata": row.get("metadata", {}),
         }
         prepared_doc_ids.add(doc_id)
         source_type_counts[source_type] = source_type_counts.get(source_type, 0) + 1
@@ -289,11 +293,12 @@ def _write_merged_document_corpus(df: pd.DataFrame, corpus_dir: Path, *, merge_t
     current_source_type: str | None = None
     current_blocks: list[str] = []
     current_doc_ids: list[str] = []
+    current_doc_metadata: list[dict[str, Any]] = []
     current_bytes = 0
     shard_index_by_source: dict[str, int] = {}
 
     def flush() -> None:
-        nonlocal current_blocks, current_doc_ids, current_bytes, current_source_type
+        nonlocal current_blocks, current_doc_ids, current_doc_metadata, current_bytes, current_source_type
         if not current_blocks or current_source_type is None:
             return
         shard_index = shard_index_by_source.get(current_source_type, 0) + 1
@@ -306,28 +311,42 @@ def _write_merged_document_corpus(df: pd.DataFrame, corpus_dir: Path, *, merge_t
         shard_uri = f"eragb-shard://{relative_path}"
         path = corpus_dir / relative_path
         path.write_text("\n".join(current_blocks).rstrip() + "\n", encoding="utf-8")
+        contained_docs = list(current_doc_ids)
+        contained_metadata = []
+        for item in current_doc_metadata:
+            updated = dict(item)
+            updated["canonical_shard_uri"] = shard_uri
+            contained_metadata.append(updated)
         manifest[relative_path] = {
             "id": shard_id,
             "source_uri": shard_uri,
+            "canonical_shard_uri": shard_uri,
             "title": f"ERAGB {current_source_type} shard {shard_index:06d}",
             "source_type": current_source_type,
             "path": relative_path,
-            "contained_doc_count": len(current_doc_ids),
+            "contained_doc_count": len(contained_docs),
+            "contained_documents": contained_metadata,
         }
         shard_manifest[relative_path] = {
             **manifest[relative_path],
-            "contained_doc_ids": list(current_doc_ids),
+            "contained_doc_ids": contained_docs,
         }
         for doc_id in current_doc_ids:
             doc_id_to_shard[doc_id] = shard_uri
         current_blocks = []
         current_doc_ids = []
+        current_doc_metadata = []
         current_bytes = 0
 
     for row in rows:
         doc_id = row["doc_id"]
         source_type = row["source_type"]
-        block = _merged_document_block(**row)
+        block = _merged_document_block(
+            doc_id=doc_id,
+            source_type=source_type,
+            title=row["title"],
+            content=row["content"],
+        )
         block_bytes = len(block.encode("utf-8"))
         if current_source_type != source_type:
             flush()
@@ -337,6 +356,13 @@ def _write_merged_document_corpus(df: pd.DataFrame, corpus_dir: Path, *, merge_t
             current_source_type = source_type
         current_blocks.append(block)
         current_doc_ids.append(doc_id)
+        current_doc_metadata.append({
+            "id": doc_id,
+            "original_document_id": doc_id,
+            "source_type": source_type,
+            "original_title": row.get("title"),
+            "metadata": row.get("metadata", {}),
+        })
         current_bytes += block_bytes
         prepared_doc_ids.add(doc_id)
         source_type_counts[source_type] = source_type_counts.get(source_type, 0) + 1
@@ -435,19 +461,43 @@ def _is_missing_value(value: Any) -> bool:
         return False
 
 
-def _document_rows(df: pd.DataFrame) -> list[dict[str, str]]:
-    rows: list[dict[str, str]] = []
+def _document_rows(df: pd.DataFrame) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
     for idx, row in enumerate(df.to_dict(orient="records")):
-        doc_id = str(row.get("doc_id") or row.get("id") or idx)
+        doc_id = str(row.get("doc_id") or row.get("id") or row.get("document_id") or idx)
+        source_type = str(row.get("source_type") or "document")
+        title = str(row.get("title") or row.get("page_title") or row.get("meeting_title") or doc_id)
         rows.append(
             {
                 "doc_id": doc_id,
-                "source_type": str(row.get("source_type") or "document"),
-                "title": str(row.get("title") or doc_id),
-                "content": str(row.get("content") or ""),
+                "source_type": source_type,
+                "title": title,
+                "content": str(row.get("content") or row.get("text") or ""),
+                "metadata": _source_metadata(row, source_type=source_type, doc_id=doc_id, title=title),
             }
         )
     return rows
+
+
+def _source_metadata(row: dict[str, Any], *, source_type: str, doc_id: str, title: str) -> dict[str, Any]:
+    metadata = {
+        "original_document_id": doc_id,
+        "source_type": source_type,
+        "original_title": title,
+    }
+    keys_by_source = {
+        "confluence": ("page_title", "space", "path", "heading_hierarchy"),
+        "slack": ("channel", "thread_timestamp", "message_timestamp", "speaker", "user"),
+        "fireflies": ("meeting_title", "date", "speaker", "turn_index"),
+    }
+    selected = keys_by_source.get(source_type.lower(), ())
+    for key in selected:
+        if key in row and not _is_missing_value(row.get(key)):
+            metadata[key] = _jsonable(row.get(key))
+    for meta_key in ("metadata", "meta_fields", "document_metadata"):
+        if isinstance(row.get(meta_key), dict):
+            metadata[meta_key] = _jsonable(row[meta_key])
+    return metadata
 
 
 def _list_value(value: Any) -> list[str]:

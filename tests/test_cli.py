@@ -581,3 +581,79 @@ def test_prepare_eragb_cli_prints_report(tmp_path, monkeypatch, capsys):
     assert observed["filter_questions_with_missing_docs"] is True
     assert observed["reference_granularity"] == "shard"
     assert "prepare-eragb" in capsys.readouterr().out
+
+
+def test_recompute_diagnostics_command_writes_artifacts_without_clients(tmp_path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "results.jsonl").write_text(
+        json.dumps(
+            {
+                "question_id": "q1",
+                "question": "q",
+                "gold_answer": "a",
+                "ragflow_answer": "wrong",
+                "expected_sources": ["eragb-shard://github/github_shard_000104.txt"],
+                "source_types": ["github"],
+                "reasoning_types": ["exact_fact"],
+                "raw_retrieval": {"chunks": [{"id": "c1", "document_name": "github_shard_000104.txt"}]},
+                "raw_response": {"reference": {"chunks": [{"id": "c1", "document_name": "github_shard_000104.txt"}]}},
+                "error": None,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (run_dir / "judge_results.jsonl").write_text(json.dumps({"question_id": "q1", "judge_score": 0, "judge_verdict": "incorrect", "judge_excluded": False}) + "\n", encoding="utf-8")
+
+    summary = cli.recompute_run_diagnostics(run_dir, output_prefix="diag")
+
+    assert summary["total_rows"] == 1
+    assert summary["raw_retrieval_expected_shard_hits"] == 1
+    assert (run_dir / "diag.json").exists()
+    assert (run_dir / "diag.md").exists()
+    assert (run_dir / "diag.rows.jsonl").exists()
+
+
+def test_retrieve_passes_rerank_id_when_configured(tmp_path, monkeypatch):
+    config_path = _write_retrieve_config(tmp_path, DatasetStrategy.REUSE_EXISTING.value)
+    payload = yaml.safe_load(Path(config_path).read_text(encoding="utf-8"))
+    payload["retrieval"] = {"rerank_id": "reranker-1"}
+    Path(config_path).write_text(yaml.safe_dump(payload), encoding="utf-8")
+    client = _FakeRetrieveClient(None)
+    monkeypatch.setattr(cli, "RagflowClient", lambda connection: client)
+    monkeypatch.setattr(cli, "make_adapter", lambda cfg: _FakeAdapter())
+    monkeypatch.setattr(cli, "resolve_dataset_id", lambda *args, **kwargs: "existing-ds")
+
+    cli.retrieve(config=config_path)
+
+    assert client.retrieve_calls[0]["rerank_id"] == "reranker-1"
+
+
+def test_score_uses_retrieval_diagnostics_for_failure_type(tmp_path, capsys):
+    results_path = tmp_path / "results.jsonl"
+    results_path.write_text(
+        json.dumps(
+            {
+                "benchmark": "enterprise_rag_bench",
+                "question_id": "q1",
+                "question": "q",
+                "gold_answer": "gold",
+                "ragflow_answer": "wrong",
+                "expected_sources": ["eragb-shard://github/github_shard_000104.txt"],
+                "raw_retrieval": {"chunks": [{"id": "c1", "document_name": "github_shard_000104.txt"}]},
+                "raw_response": {"reference": {"chunks": [{"id": "c1", "document_name": "github_shard_000104.txt"}]}},
+                "judge_verdict": "incorrect",
+                "judge_score": 0,
+                "judge_excluded": False,
+                "error": None,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    cli.score(results=str(results_path))
+
+    summary = json.loads((tmp_path / "summary.json").read_text(encoding="utf-8"))
+    assert summary["failure_type_counts"] == {"expected_source_present_final_context_answer_wrong": 1}

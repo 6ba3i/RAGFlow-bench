@@ -20,6 +20,7 @@ from ragflow_bench.logging_utils import configure_logging, default_progress_prin
 from ragflow_bench.ragflow import RagflowClient
 from ragflow_bench.ragflow.errors import RagflowAPIError, RagflowConfigError
 from ragflow_bench.reports.summary import build_summary
+from ragflow_bench.reports.diagnostics import recompute_row_diagnostics, recompute_run_diagnostics
 from ragflow_bench.reports.writers import jsonl_to_csv, load_jsonl, write_json, write_jsonl
 from ragflow_bench.scoring import classify_failure, exact_match, normalized_match, source_recall
 from ragflow_bench.wizard import run_wizard
@@ -384,6 +385,7 @@ def retrieve(config: str = typer.Option(..., help="Config YAML path")) -> None:
         similarity_threshold=cfg.retrieval.similarity_threshold,
         vector_similarity_weight=cfg.retrieval.vector_similarity_weight,
         top_k=cfg.retrieval.top_k,
+        rerank_id=cfg.retrieval.rerank_id,
     )
     emit_progress(default_progress_printer, {"command": "retrieve", "step": "retrieval", "status": "ok", "question_id": getattr(question, "id", None), "dataset_id": dataset_id, "count": payload.get("total") if isinstance(payload, dict) else None})
     console.print_json(json.dumps(payload, ensure_ascii=False))
@@ -475,20 +477,21 @@ def score(results: str = typer.Option(..., help="Path to results.jsonl")) -> Non
     rescored = []
     for index, row in enumerate(rows, start=1):
         emit_progress(default_progress_printer, {"command": "score", "step": "row", "status": "start", "index": index, "total": len(rows), "question_id": row.get("question_id")})
-        row["exact_match"] = exact_match(row.get("gold_answer"), row.get("ragflow_answer"))
-        row["normalized_match"] = normalized_match(row.get("gold_answer"), row.get("ragflow_answer"))
-        row["source_recall"] = source_recall(row.get("expected_sources", []), row.get("retrieved_source_uris", []))
-        row["failure_type"] = classify_failure(
-            error=row.get("error"),
-            ragflow_answer=row.get("ragflow_answer"),
-            exact_match=row["exact_match"],
-            source_recall=row["source_recall"],
-        )
+        row = recompute_row_diagnostics(row)
         rescored.append(row)
         emit_progress(default_progress_printer, {"command": "score", "step": "row", "status": row["failure_type"], "index": index, "total": len(rows), "question_id": row.get("question_id")})
     summary = build_summary(benchmark=rows[0].get("benchmark", ""), mode="rescored", rows=rescored) if rows else {}
     write_json(path.with_name("summary.json"), summary)
     emit_progress(default_progress_printer, {"command": "score", "step": "summary_write", "status": "ok", "path": str(path.with_name("summary.json")), "count": len(rescored)})
+    console.print_json(json.dumps(summary, ensure_ascii=False))
+
+
+@app.command("recompute-diagnostics")
+def recompute_diagnostics(
+    run_dir: str = typer.Argument(..., help="Existing run directory containing results.jsonl"),
+    output_prefix: str = typer.Option("diagnostics", "--output-prefix", help="Output file prefix written inside the run directory"),
+) -> None:
+    summary = recompute_run_diagnostics(run_dir, output_prefix=output_prefix)
     console.print_json(json.dumps(summary, ensure_ascii=False))
 
 

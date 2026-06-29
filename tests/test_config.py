@@ -138,3 +138,10 @@ def test_judge_settings_default_and_env_resolution(monkeypatch):
     assert cfg.resolved_max_retries() == 5
     assert cfg.resolved_backoff_seconds() == 1.5
     assert cfg.resolved_max_backoff_seconds() == 8.0
+
+
+def test_rerank_id_defaults_to_absent_and_exact_fact_prompt_mode_default():
+    from ragflow_bench.config import RetrievalSettings, ChatSettings
+
+    assert RetrievalSettings().rerank_id is None
+    assert ChatSettings().prompt_mode == "default"
