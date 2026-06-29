@@ -40,6 +40,7 @@ def prepare_eragb_artifacts(
     merge_target_bytes: int = 262144,
     merge_max_docs: int = 100,
     filter_questions_with_missing_docs: bool = False,
+    include_only_question_docs: bool = False,
     reference_granularity: ReferenceGranularity | None = None,
     progress_callback: ProgressCallback | None = None,
 ) -> dict[str, Any]:
@@ -91,10 +92,19 @@ def prepare_eragb_artifacts(
     emit_progress(progress_callback, {"command": "prepare-eragb", "step": "read_parquet", "status": "start"})
     documents_df = pd.read_parquet(documents_parquet)
     questions_df = pd.read_parquet(questions_parquet)
-    if document_limit is not None:
-        documents_df = documents_df.head(max(0, document_limit))
     if question_limit is not None:
         questions_df = questions_df.head(max(0, question_limit))
+
+    required_doc_ids = _required_doc_ids_for_questions(questions_df)
+    required_doc_id_set = set(required_doc_ids)
+    document_count_before_question_filter = int(len(documents_df))
+    available_doc_ids_before_filter = _document_id_set(documents_df)
+    question_doc_filter_missing_count = len(required_doc_id_set - available_doc_ids_before_filter)
+    if include_only_question_docs:
+        documents_df = _filter_documents_by_doc_ids(documents_df, required_doc_id_set)
+    document_count_after_question_filter = int(len(documents_df))
+    if document_limit is not None:
+        documents_df = documents_df.head(max(0, document_limit))
     emit_progress(progress_callback, {"command": "prepare-eragb", "step": "read_parquet", "status": "ok", "count": int(len(documents_df)), "total": int(len(questions_df))})
 
     if merge_documents:
@@ -155,6 +165,11 @@ def prepare_eragb_artifacts(
         "question_count_written": len(normalized_questions),
         "question_count": len(normalized_questions),
         "question_count_dropped_missing_docs": dropped_missing,
+        "include_only_question_docs": include_only_question_docs,
+        "required_doc_count": len(required_doc_ids),
+        "document_count_before_question_filter": document_count_before_question_filter,
+        "document_count_after_question_filter": document_count_after_question_filter,
+        "question_doc_filter_missing_count": question_doc_filter_missing_count,
         "reference_granularity": reference_granularity,
         "merge_documents": merge_documents,
         "merge_target_bytes": merge_target_bytes if merge_documents else None,
@@ -445,6 +460,36 @@ def _expected_doc_ids_from_row(row: dict[str, Any]) -> list[str]:
     return _list_value(_first_present_value(row, ("expected_sources", "expected_doc_ids", "expected_documents", "citations")))
 
 
+def _required_doc_ids_for_questions(questions_df: pd.DataFrame) -> list[str]:
+    return _dedupe_preserve_order(
+        doc_id
+        for row in questions_df.to_dict(orient="records")
+        for doc_id in _expected_doc_ids_from_row(row)
+    )
+
+
+def _document_id_from_row(row: dict[str, Any], fallback: int | None = None) -> str:
+    value = row.get("doc_id") or row.get("id") or row.get("document_id")
+    if value is None and fallback is not None:
+        value = fallback
+    return str(value)
+
+
+def _document_id_set(df: pd.DataFrame) -> set[str]:
+    return {_document_id_from_row(row, idx) for idx, row in enumerate(df.to_dict(orient="records"))}
+
+
+def _filter_documents_by_doc_ids(df: pd.DataFrame, required_doc_ids: set[str]) -> pd.DataFrame:
+    if not required_doc_ids:
+        return df.head(0)
+    rows = [
+        row
+        for idx, row in enumerate(df.to_dict(orient="records"))
+        if _document_id_from_row(row, idx) in required_doc_ids
+    ]
+    return pd.DataFrame(rows, columns=df.columns)
+
+
 def _first_present_value(row: dict[str, Any], keys: tuple[str, ...]) -> Any:
     for key in keys:
         if key in row and not _is_missing_value(row[key]):
@@ -464,7 +509,7 @@ def _is_missing_value(value: Any) -> bool:
 def _document_rows(df: pd.DataFrame) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for idx, row in enumerate(df.to_dict(orient="records")):
-        doc_id = str(row.get("doc_id") or row.get("id") or row.get("document_id") or idx)
+        doc_id = _document_id_from_row(row, idx)
         source_type = str(row.get("source_type") or "document")
         title = str(row.get("title") or row.get("page_title") or row.get("meeting_title") or doc_id)
         rows.append(

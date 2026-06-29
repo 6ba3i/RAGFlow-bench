@@ -68,6 +68,11 @@ def test_prepare_eragb_artifacts_downloads_and_converts_parquet(tmp_path, monkey
     assert manifest["github/dsid_1.txt"]["source_uri"] == "dsid_1"
     assert report["document_count"] == 2
     assert report["question_count"] == 1
+    assert report["include_only_question_docs"] is False
+    assert report["required_doc_count"] == 1
+    assert report["document_count_before_question_filter"] == 2
+    assert report["document_count_after_question_filter"] == 2
+    assert report["question_doc_filter_missing_count"] == 0
 
 
 def test_prepare_eragb_artifacts_reuses_existing_parquet_and_honors_limits(tmp_path, monkeypatch):
@@ -98,6 +103,93 @@ def test_prepare_eragb_artifacts_reuses_existing_parquet_and_honors_limits(tmp_p
     assert report["document_count"] == 1
     assert report["question_count"] == 1
     assert not (tmp_path / "eragb" / "corpus" / "slack" / "dsid_2.txt").exists()
+
+
+def test_prepare_eragb_include_only_question_docs_filters_to_selected_question_docs(tmp_path, monkeypatch):
+    raw_docs = tmp_path / "eragb" / "raw" / "documents"
+    raw_questions = tmp_path / "eragb" / "raw" / "questions"
+    raw_docs.mkdir(parents=True)
+    raw_questions.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {"doc_id": "dsid_1", "source_type": "github", "title": "One", "content": "one"},
+            {"doc_id": "dsid_2", "source_type": "slack", "title": "Two", "content": "two"},
+            {"doc_id": "dsid_3", "source_type": "confluence", "title": "Three", "content": "three"},
+        ]
+    ).to_parquet(raw_docs / "test.parquet")
+    pd.DataFrame(
+        [
+            {"question_id": "qst_1", "question": "two?", "expected_doc_ids": ["dsid_2"], "gold_answer": "two"},
+            {"question_id": "qst_2", "question": "three?", "expected_doc_ids": ["dsid_3"], "gold_answer": "three"},
+        ]
+    ).to_parquet(raw_questions / "test.parquet")
+    monkeypatch.setattr(
+        "ragflow_bench.benchmarks.eragb_prep.hf_hub_download",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("should reuse existing parquet")),
+    )
+
+    report = prepare_eragb_artifacts(
+        output_dir=tmp_path / "eragb",
+        question_limit=1,
+        include_only_question_docs=True,
+    )
+
+    assert (tmp_path / "eragb" / "corpus" / "slack" / "dsid_2.txt").exists()
+    assert not (tmp_path / "eragb" / "corpus" / "github" / "dsid_1.txt").exists()
+    assert not (tmp_path / "eragb" / "corpus" / "confluence" / "dsid_3.txt").exists()
+    assert report["include_only_question_docs"] is True
+    assert report["required_doc_count"] == 1
+    assert report["document_count_before_question_filter"] == 3
+    assert report["document_count_after_question_filter"] == 1
+    assert report["document_count"] == 1
+    assert report["question_doc_filter_missing_count"] == 0
+    questions = [json.loads(line) for line in (tmp_path / "eragb" / "questions.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert len(questions) == 1
+    assert questions[0]["expected_doc_ids"] == ["dsid_2"]
+    assert questions[0]["expected_sources"] == ["dsid_2"]
+
+
+def test_prepare_eragb_include_only_question_docs_applies_document_limit_after_filter(tmp_path, monkeypatch):
+    raw_docs = tmp_path / "eragb" / "raw" / "documents"
+    raw_questions = tmp_path / "eragb" / "raw" / "questions"
+    raw_docs.mkdir(parents=True)
+    raw_questions.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {"doc_id": "dsid_a", "source_type": "github", "title": "A", "content": "a"},
+            {"doc_id": "dsid_b", "source_type": "github", "title": "B", "content": "b"},
+            {"doc_id": "dsid_c", "source_type": "github", "title": "C", "content": "c"},
+        ]
+    ).to_parquet(raw_docs / "test.parquet")
+    pd.DataFrame(
+        [
+            {
+                "question_id": "qst_1",
+                "question": "a and b?",
+                "expected_doc_ids": ["dsid_a", "dsid_b"],
+                "gold_answer": "a b",
+            }
+        ]
+    ).to_parquet(raw_questions / "test.parquet")
+    monkeypatch.setattr(
+        "ragflow_bench.benchmarks.eragb_prep.hf_hub_download",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("should reuse existing parquet")),
+    )
+
+    report = prepare_eragb_artifacts(
+        output_dir=tmp_path / "eragb",
+        include_only_question_docs=True,
+        document_limit=1,
+        filter_questions_with_missing_docs=True,
+    )
+
+    assert report["required_doc_count"] == 2
+    assert report["document_count_before_question_filter"] == 3
+    assert report["document_count_after_question_filter"] == 2
+    assert report["document_count"] == 1
+    assert report["question_count_written"] == 0
+    assert report["question_count_dropped_missing_docs"] == 1
+    assert report["question_doc_filter_missing_count"] == 0
 
 
 def test_enterprise_adapter_reads_onyx_and_manifest_relative_paths(tmp_path):
@@ -363,6 +455,52 @@ def test_prepare_eragb_merged_mode_can_disable_reference_sources(tmp_path, monke
     questions = [json.loads(line) for line in (tmp_path / "eragb" / "questions.jsonl").read_text(encoding="utf-8").splitlines()]
     assert questions[0]["expected_sources"] == []
     assert questions[0]["reference_granularity"] == "none"
+
+
+def test_prepare_eragb_include_only_question_docs_filters_merged_shards(tmp_path, monkeypatch):
+    source_docs = tmp_path / "source_documents.parquet"
+    source_questions = tmp_path / "source_questions.parquet"
+    pd.DataFrame(
+        [
+            {"doc_id": "gh1", "source_type": "github", "title": "GH", "content": "github"},
+            {"doc_id": "sl1", "source_type": "slack", "title": "Slack 1", "content": "slack one"},
+            {"doc_id": "sl2", "source_type": "slack", "title": "Slack 2", "content": "slack two"},
+        ]
+    ).to_parquet(source_docs)
+    pd.DataFrame([{"question_id": "qst_1", "question": "slack two?", "expected_doc_ids": ["sl2"], "gold_answer": "slack two"}]).to_parquet(source_questions)
+    monkeypatch.setattr(
+        "ragflow_bench.benchmarks.eragb_prep.HfApi.list_repo_files",
+        lambda self, **kwargs: ["data/documents/test.parquet", "data/questions/test.parquet"],
+    )
+    monkeypatch.setattr(
+        "ragflow_bench.benchmarks.eragb_prep.hf_hub_download",
+        lambda **kwargs: str(source_docs if "documents" in kwargs["filename"] else source_questions),
+    )
+
+    report = prepare_eragb_artifacts(
+        output_dir=tmp_path / "eragb",
+        merge_documents=True,
+        include_only_question_docs=True,
+        question_limit=1,
+        merge_max_docs=10,
+    )
+
+    assert report["document_count"] == 1
+    assert report["shard_count"] == 1
+    assert report["document_count_before_question_filter"] == 3
+    assert report["document_count_after_question_filter"] == 1
+    slack_shard = tmp_path / "eragb" / "corpus" / "slack" / "slack_shard_000001.txt"
+    assert slack_shard.exists()
+    shard_text = slack_shard.read_text(encoding="utf-8")
+    assert "Document ID: sl2" in shard_text
+    assert "Document ID: gh1" not in shard_text
+    assert "Document ID: sl1" not in shard_text
+    doc_map = json.loads((tmp_path / "eragb" / "doc_id_to_shard.json").read_text(encoding="utf-8"))
+    assert doc_map == {"sl2": "eragb-shard://slack/slack_shard_000001.txt"}
+    shard_manifest = json.loads((tmp_path / "eragb" / "shard_manifest.json").read_text(encoding="utf-8"))
+    assert shard_manifest["slack/slack_shard_000001.txt"]["contained_doc_ids"] == ["sl2"]
+    questions = [json.loads(line) for line in (tmp_path / "eragb" / "questions.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert questions[0]["expected_sources"] == ["eragb-shard://slack/slack_shard_000001.txt"]
 
 
 def test_prepare_eragb_verifies_required_hf_paths_before_download(tmp_path, monkeypatch):

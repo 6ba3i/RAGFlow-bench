@@ -185,6 +185,7 @@ def prepare_eragb(
     merge_target_bytes: int = typer.Option(262144, help="Target maximum shard size in bytes when merging documents"),
     merge_max_docs: int = typer.Option(100, help="Maximum embedded documents per shard when merging documents"),
     filter_questions_with_missing_docs: bool = typer.Option(False, help="Drop questions whose expected docs are not present in the prepared corpus"),
+    include_only_question_docs: bool = typer.Option(False, help="Prepare only documents referenced by the selected ERAGB questions"),
     reference_granularity: str | None = typer.Option(None, help="Expected-source granularity: document, shard, or none. Defaults to shard in merged mode, document otherwise."),
 ) -> None:
     try:
@@ -199,6 +200,7 @@ def prepare_eragb(
             merge_target_bytes=merge_target_bytes,
             merge_max_docs=merge_max_docs,
             filter_questions_with_missing_docs=filter_questions_with_missing_docs,
+            include_only_question_docs=include_only_question_docs,
             reference_granularity=reference_granularity,
             progress_callback=default_progress_printer,
         )

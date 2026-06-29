@@ -297,18 +297,18 @@ def test_judge_results_file_sleeps_between_nonfinal_rows(tmp_path, monkeypatch):
     assert [event["delay"] for event in delay_events] == [5.5, 5.5]
 
 
-def test_zhipu_judge_does_not_retry_read_timeout(monkeypatch):
+def test_zhipu_judge_retries_read_timeout(monkeypatch):
     client = _make_client(max_retries=2, backoff_seconds=0.01, max_backoff_seconds=0.01)
     session = _SequenceSession([requests.ReadTimeout("slow"), _judge_success_response()])
     sleeps = []
     client.session = session
     monkeypatch.setattr("ragflow_bench.judge.time.sleep", lambda seconds: sleeps.append(seconds))
 
-    with pytest.raises(requests.ReadTimeout):
-        client.judge_row(RESULT_ROW)
+    verdict = client.judge_row(RESULT_ROW)
 
-    assert session.calls == 1
-    assert sleeps == []
+    assert verdict["verdict"] == "correct"
+    assert session.calls == 2
+    assert sleeps == [0.01]
 
 
 def test_zhipu_judge_uses_retry_after_when_present(monkeypatch):
@@ -319,14 +319,14 @@ def test_zhipu_judge_uses_retry_after_when_present(monkeypatch):
     ])
     sleeps = []
     client.session = session
-    monkeypatch.setattr("ragflow_bench.rate_limits.time.sleep", lambda seconds: sleeps.append(seconds))
+    monkeypatch.setattr("ragflow_bench.judge.time.sleep", lambda seconds: sleeps.append(seconds))
     monkeypatch.setattr("ragflow_bench.rate_limits.random.uniform", lambda a, b: 19.0)
 
     verdict = client.judge_row(RESULT_ROW)
 
     assert verdict["verdict"] == "correct"
     assert session.calls == 2
-    assert sleeps == [19.0]
+    assert sleeps == [3.0]
 
 
 def test_zhipu_judge_retries_429_then_succeeds(monkeypatch):
@@ -337,17 +337,17 @@ def test_zhipu_judge_retries_429_then_succeeds(monkeypatch):
     ])
     sleeps = []
     client.session = session
-    monkeypatch.setattr("ragflow_bench.rate_limits.time.sleep", lambda seconds: sleeps.append(seconds))
+    monkeypatch.setattr("ragflow_bench.judge.time.sleep", lambda seconds: sleeps.append(seconds))
     monkeypatch.setattr("ragflow_bench.rate_limits.random.uniform", lambda a, b: 15.5)
 
     verdict = client.judge_row(RESULT_ROW)
 
     assert verdict["verdict"] == "correct"
     assert session.calls == 2
-    assert sleeps == [15.5]
+    assert sleeps == [0.25]
 
 
-def test_zhipu_judge_does_not_retry_503(monkeypatch):
+def test_zhipu_judge_retries_503_with_budget(monkeypatch):
     client = _make_client(max_retries=2, backoff_seconds=0.1, max_backoff_seconds=0.2)
     session = _SequenceSession([
         _StubResponse(status_code=503, text='{"error":"busy"}'),
@@ -356,15 +356,15 @@ def test_zhipu_judge_does_not_retry_503(monkeypatch):
     ])
     sleeps = []
     client.session = session
-    monkeypatch.setattr("ragflow_bench.rate_limits.time.sleep", lambda seconds: sleeps.append(seconds))
+    monkeypatch.setattr("ragflow_bench.judge.time.sleep", lambda seconds: sleeps.append(seconds))
     monkeypatch.setattr("ragflow_bench.rate_limits.random.uniform", lambda a, b: 20.0)
 
     with pytest.raises(RagflowAPIError) as exc:
         client.judge_row(RESULT_ROW)
 
     assert exc.value.status_code == 503
-    assert session.calls == 1
-    assert sleeps == []
+    assert session.calls == 3
+    assert sleeps == [0.1, 0.2]
 
 
 def test_zhipu_judge_does_not_retry_401(monkeypatch):
@@ -620,7 +620,7 @@ def test_zhipu_judge_logs_429_attempts(monkeypatch):
     events = []
     client.session = session
     client.progress_callback = events.append
-    monkeypatch.setattr("ragflow_bench.rate_limits.time.sleep", lambda seconds: sleeps.append(seconds))
+    monkeypatch.setattr("ragflow_bench.judge.time.sleep", lambda seconds: sleeps.append(seconds))
     monkeypatch.setattr("ragflow_bench.rate_limits.random.uniform", lambda a, b: 15.0)
 
     verdict = client.judge_row({"question_id": "qid1", **RESULT_ROW})
@@ -629,9 +629,9 @@ def test_zhipu_judge_logs_429_attempts(monkeypatch):
     retry_events = [event for event in events if event.get("type") == "rate_limit_retry"]
     assert verdict["verdict"] == "correct"
     assert request_events[0]["status_code"] == 429
-    assert request_events[0]["retry"] is False
+    assert request_events[0]["retry"] is True
+    assert request_events[0]["delay"] == 0.01
     assert request_events[1]["status_code"] == 200
     assert request_events[1]["retry"] is False
-    assert retry_events[0]["retry"] is True
-    assert retry_events[0]["delay"] == 15.0
-    assert sleeps == [15.0]
+    assert retry_events == []
+    assert sleeps == [0.01]
