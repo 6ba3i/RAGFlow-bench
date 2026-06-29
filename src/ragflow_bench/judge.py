@@ -14,7 +14,7 @@ from ragflow_bench.config import JudgeSettings
 from ragflow_bench.logging_utils import redact_text
 from ragflow_bench.rate_limits import run_with_rate_limit_retries
 from ragflow_bench.ragflow.errors import RagflowAPIError, RagflowConfigError
-from ragflow_bench.reports.writers import jsonl_to_csv, write_json
+from ragflow_bench.reports.writers import jsonl_to_csv, write_json, write_jsonl
 
 EXCLUDED_INFRA_ERROR_MARKERS = (
     "**ERROR**:",
@@ -412,26 +412,28 @@ def judge_results_file(
     client: ZhipuJudgeClient,
     output_path: str | Path | None = None,
     resume: bool = True,
+    force_question_ids: set[str] | None = None,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     input_path = Path(results_path)
     rows = [json.loads(line) for line in input_path.read_text(encoding="utf-8").splitlines() if line.strip()]
     target = Path(output_path) if output_path else input_path.with_name("judge_results.jsonl")
+    forced_ids = {str(question_id) for question_id in (force_question_ids or set())}
 
     existing_rows = _load_existing_judged_rows(target) if resume else []
     judged_by_id = {_row_resume_key(row, index): row for index, row in enumerate(existing_rows, start=1)}
-    judged_rows: list[dict[str, Any]] = list(judged_by_id.values())
     started = time.monotonic()
     previous_callback = getattr(client, "progress_callback", None)
     client.progress_callback = progress_callback
 
-    mode = "a" if resume and target.exists() else "w"
+    mode = "a" if resume and target.exists() and not forced_ids else "w"
     try:
         with target.open(mode, encoding="utf-8") as handle:
             for index, row in enumerate(rows, start=1):
                 question_id = str(row.get("question_id") or "")
                 resume_key = _row_resume_key(row, index)
-                if resume and resume_key in judged_by_id:
+                should_force = bool(forced_ids) and resume_key in forced_ids
+                if resume and resume_key in judged_by_id and not should_force:
                     existing = judged_by_id[resume_key]
                     _emit_progress(progress_callback, {
                         "type": "judge_row",
@@ -462,10 +464,10 @@ def judge_results_file(
                 except Exception as exc:  # noqa: BLE001
                     verdict = _judge_error_verdict(exc)
                 judged = _make_judged_row(row, client=client, verdict=verdict)
-                handle.write(json.dumps(judged, ensure_ascii=False) + "\n")
-                handle.flush()
                 judged_by_id[resume_key] = judged
-                judged_rows.append(judged)
+                if not forced_ids:
+                    handle.write(json.dumps(judged, ensure_ascii=False) + "\n")
+                    handle.flush()
                 status = "judge_error" if judged.get("judge_exclusion_reason") == "judge_error" else ("excluded" if judged.get("judge_excluded") else "judged")
                 _emit_progress(progress_callback, {
                     "type": "judge_row",
@@ -494,6 +496,8 @@ def judge_results_file(
         client.progress_callback = previous_callback
 
     final_rows = [judged_by_id[_row_resume_key(row, index)] for index, row in enumerate(rows, start=1) if _row_resume_key(row, index) in judged_by_id]
+    if forced_ids:
+        write_jsonl(target, final_rows)
     jsonl_to_csv(target, target.with_suffix(".csv"))
     summary = summarize_judged_rows(rows=final_rows, model=client.model)
     write_json(target.with_name("judge_summary.json"), summary)

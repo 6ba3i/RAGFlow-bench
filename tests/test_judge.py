@@ -271,18 +271,44 @@ def test_judge_command_uses_configured_model_and_allows_override(tmp_path, monke
     assert "answer_accuracy" in captured.out
 
 
-def test_zhipu_judge_retries_read_timeout_then_succeeds(monkeypatch):
+def test_judge_results_file_sleeps_between_nonfinal_rows(tmp_path, monkeypatch):
+    results_path = tmp_path / "results.jsonl"
+    results_path.write_text(
+        "\n".join(
+            [
+                json.dumps({"question_id": "1", "question": "Q1", "gold_answer": "A1", "ragflow_answer": "Paris"}),
+                json.dumps({"question_id": "2", "question": "Q2", "gold_answer": "A2", "ragflow_answer": "part of it"}),
+                json.dumps({"question_id": "3", "question": "Q3", "gold_answer": "A3", "ragflow_answer": "wrong"}),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    delays = []
+    events = []
+
+    monkeypatch.setattr("ragflow_bench.judge.random.uniform", lambda a, b: 5.5)
+    monkeypatch.setattr("ragflow_bench.judge.time.sleep", lambda seconds: delays.append(seconds))
+
+    judge_results_file(results_path=results_path, client=_FakeJudgeClient(), progress_callback=events.append)
+
+    assert delays == [5.5, 5.5]
+    delay_events = [event for event in events if event.get("type") == "judge_row_delay"]
+    assert [event["delay"] for event in delay_events] == [5.5, 5.5]
+
+
+def test_zhipu_judge_does_not_retry_read_timeout(monkeypatch):
     client = _make_client(max_retries=2, backoff_seconds=0.01, max_backoff_seconds=0.01)
     session = _SequenceSession([requests.ReadTimeout("slow"), _judge_success_response()])
     sleeps = []
     client.session = session
     monkeypatch.setattr("ragflow_bench.judge.time.sleep", lambda seconds: sleeps.append(seconds))
 
-    verdict = client.judge_row(RESULT_ROW)
+    with pytest.raises(requests.ReadTimeout):
+        client.judge_row(RESULT_ROW)
 
-    assert verdict["verdict"] == "correct"
-    assert session.calls == 2
-    assert sleeps == [0.01]
+    assert session.calls == 1
+    assert sleeps == []
 
 
 def test_zhipu_judge_uses_retry_after_when_present(monkeypatch):
@@ -293,13 +319,14 @@ def test_zhipu_judge_uses_retry_after_when_present(monkeypatch):
     ])
     sleeps = []
     client.session = session
-    monkeypatch.setattr("ragflow_bench.judge.time.sleep", lambda seconds: sleeps.append(seconds))
+    monkeypatch.setattr("ragflow_bench.rate_limits.time.sleep", lambda seconds: sleeps.append(seconds))
+    monkeypatch.setattr("ragflow_bench.rate_limits.random.uniform", lambda a, b: 19.0)
 
     verdict = client.judge_row(RESULT_ROW)
 
     assert verdict["verdict"] == "correct"
     assert session.calls == 2
-    assert sleeps == [3.0]
+    assert sleeps == [19.0]
 
 
 def test_zhipu_judge_retries_429_then_succeeds(monkeypatch):
@@ -310,16 +337,17 @@ def test_zhipu_judge_retries_429_then_succeeds(monkeypatch):
     ])
     sleeps = []
     client.session = session
-    monkeypatch.setattr("ragflow_bench.judge.time.sleep", lambda seconds: sleeps.append(seconds))
+    monkeypatch.setattr("ragflow_bench.rate_limits.time.sleep", lambda seconds: sleeps.append(seconds))
+    monkeypatch.setattr("ragflow_bench.rate_limits.random.uniform", lambda a, b: 15.5)
 
     verdict = client.judge_row(RESULT_ROW)
 
     assert verdict["verdict"] == "correct"
     assert session.calls == 2
-    assert sleeps == [0.25]
+    assert sleeps == [15.5]
 
 
-def test_zhipu_judge_raises_after_retry_exhaustion(monkeypatch):
+def test_zhipu_judge_does_not_retry_503(monkeypatch):
     client = _make_client(max_retries=2, backoff_seconds=0.1, max_backoff_seconds=0.2)
     session = _SequenceSession([
         _StubResponse(status_code=503, text='{"error":"busy"}'),
@@ -328,14 +356,15 @@ def test_zhipu_judge_raises_after_retry_exhaustion(monkeypatch):
     ])
     sleeps = []
     client.session = session
-    monkeypatch.setattr("ragflow_bench.judge.time.sleep", lambda seconds: sleeps.append(seconds))
+    monkeypatch.setattr("ragflow_bench.rate_limits.time.sleep", lambda seconds: sleeps.append(seconds))
+    monkeypatch.setattr("ragflow_bench.rate_limits.random.uniform", lambda a, b: 20.0)
 
     with pytest.raises(RagflowAPIError) as exc:
         client.judge_row(RESULT_ROW)
 
     assert exc.value.status_code == 503
-    assert session.calls == 3
-    assert sleeps == [0.1, 0.1]
+    assert session.calls == 1
+    assert sleeps == []
 
 
 def test_zhipu_judge_does_not_retry_401(monkeypatch):
@@ -485,6 +514,61 @@ def test_judge_results_file_resumes_existing_rows(tmp_path):
     assert row_events[0]["status"] == "skipped"
     assert row_events[1]["status"] == "judged"
 
+def test_judge_results_file_force_question_ids_replaces_existing_rows(tmp_path):
+    results_path = tmp_path / "results.jsonl"
+    results_path.write_text(
+        "\n".join(
+            [
+                json.dumps({"benchmark": "frames", "question_id": "1", "question": "Q1", "gold_answer": "A1", "ragflow_answer": "Paris"}),
+                json.dumps({"benchmark": "frames", "question_id": "2", "question": "Q2", "gold_answer": "A2", "ragflow_answer": "Paris"}),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    existing_rows = [
+        {
+            "question_id": "1",
+            "judge_model": "glm-4.7-flash",
+            "judge_score": 4,
+            "judge_score_normalized": 1.0,
+            "judge_verdict": "correct",
+            "judge_reason": "preserved",
+            "judge_confidence": 1.0,
+            "judge_matched_facts": [],
+            "judge_missing_or_wrong_facts": [],
+            "judge_excluded": False,
+            "judge_exclusion_reason": None,
+            "judge_correct": True,
+        },
+        {
+            "question_id": "2",
+            "judge_model": "glm-4.7-flash",
+            "judge_score": None,
+            "judge_score_normalized": None,
+            "judge_verdict": "judge_error",
+            "judge_reason": "old error",
+            "judge_confidence": None,
+            "judge_matched_facts": [],
+            "judge_missing_or_wrong_facts": [],
+            "judge_excluded": True,
+            "judge_exclusion_reason": "judge_error",
+            "judge_correct": False,
+        },
+    ]
+    (tmp_path / "judge_results.jsonl").write_text("\n".join(json.dumps(row) for row in existing_rows) + "\n", encoding="utf-8")
+    events = []
+
+    summary = judge_results_file(results_path=results_path, client=_FakeJudgeClient(), resume=True, force_question_ids={"2"}, progress_callback=events.append)
+
+    judged_rows = [json.loads(line) for line in (tmp_path / "judge_results.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [row["question_id"] for row in judged_rows] == ["1", "2"]
+    assert judged_rows[0]["judge_reason"] == "preserved"
+    assert judged_rows[1]["judge_verdict"] == "correct"
+    assert judged_rows[1]["judge_exclusion_reason"] is None
+    assert summary["judge_error_questions"] == 0
+    assert [event["status"] for event in events if event.get("type") == "judge_row"] == ["skipped", "judged"]
+
 
 def test_judge_results_file_no_resume_overwrites_existing_rows(tmp_path):
     results_path = tmp_path / "results.jsonl"
@@ -536,14 +620,18 @@ def test_zhipu_judge_logs_429_attempts(monkeypatch):
     events = []
     client.session = session
     client.progress_callback = events.append
-    monkeypatch.setattr("ragflow_bench.judge.time.sleep", lambda seconds: sleeps.append(seconds))
+    monkeypatch.setattr("ragflow_bench.rate_limits.time.sleep", lambda seconds: sleeps.append(seconds))
+    monkeypatch.setattr("ragflow_bench.rate_limits.random.uniform", lambda a, b: 15.0)
 
     verdict = client.judge_row({"question_id": "qid1", **RESULT_ROW})
 
     request_events = [event for event in events if event.get("type") == "judge_request"]
+    retry_events = [event for event in events if event.get("type") == "rate_limit_retry"]
     assert verdict["verdict"] == "correct"
     assert request_events[0]["status_code"] == 429
-    assert request_events[0]["retry"] is True
-    assert request_events[0]["delay"] == 0.01
+    assert request_events[0]["retry"] is False
     assert request_events[1]["status_code"] == 200
     assert request_events[1]["retry"] is False
+    assert retry_events[0]["retry"] is True
+    assert retry_events[0]["delay"] == 15.0
+    assert sleeps == [15.0]

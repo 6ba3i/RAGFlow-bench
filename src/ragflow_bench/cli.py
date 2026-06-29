@@ -51,7 +51,7 @@ def _row_needs_retry(row: dict) -> bool:
     return bool(row.get("error")) or is_excluded_infra_error(row)
 
 
-def _auto_judge_run_dir(run_dir: str | Path, *, resume: bool = True) -> dict:
+def _auto_judge_run_dir(run_dir: str | Path, *, resume: bool = True, force_question_ids: set[str] | None = None) -> dict:
     run_path = Path(run_dir)
     results_path = run_path / "results.jsonl"
     config_path = run_path / "config.resolved.yaml"
@@ -65,8 +65,14 @@ def _auto_judge_run_dir(run_dir: str | Path, *, resume: bool = True) -> dict:
         client=ZhipuJudgeClient(cfg.judge),
         output_path=run_path / "judge_results.jsonl",
         resume=resume,
+        force_question_ids=force_question_ids,
         progress_callback=judge_progress_printer,
     )
+
+
+def _judge_error_question_ids(run_dir: str | Path) -> set[str]:
+    rows = load_jsonl(Path(run_dir) / "judge_results.jsonl")
+    return {str(row.get("question_id")) for row in rows if row.get("question_id") is not None and row.get("judge_exclusion_reason") == "judge_error"}
 
 
 def _merge_retry_rows(original_rows: list[dict], retry_rows: list[dict]) -> tuple[list[dict], int]:
@@ -438,7 +444,8 @@ def retry_failed(run_dir: str = typer.Option(..., help="Existing run directory c
     summary = build_summary(benchmark=merged_rows[0].get("benchmark", "") if merged_rows else "", mode=cfg.benchmark.mode.value, rows=merged_rows)
     write_json(run_path / "summary.json", summary)
     emit_progress(default_progress_printer, {"command": "retry-failed", "step": "summary_write", "status": "ok", "path": str(run_path / "summary.json")})
-    _auto_judge_run_dir(run_path, resume=False)
+    judge_retry_ids = set(failed_ids) | _judge_error_question_ids(run_path)
+    _auto_judge_run_dir(run_path, resume=True, force_question_ids=judge_retry_ids)
 
     successful_retries = sum(1 for row in retry_rows if not _row_needs_retry(row))
     remaining_errors = sum(1 for row in merged_rows if _row_needs_retry(row))
@@ -452,6 +459,7 @@ def retry_failed(run_dir: str = typer.Option(..., help="Existing run directory c
         "replaced_rows": replaced,
         "successful_retries": successful_retries,
         "remaining_errors": remaining_errors,
+        "judge_retry_rows_selected": len(judge_retry_ids),
     }
     write_json(retry_output_dir / "retry_report.json", report)
     emit_progress(default_progress_printer, {"command": "retry-failed", "step": "complete", "status": "ok", "count": len(retry_rows), "replaced": replaced, "remaining_errors": remaining_errors})

@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
@@ -153,6 +154,98 @@ def test_enterprise_adapter_reads_onyx_and_manifest_relative_paths(tmp_path):
     assert loaded_questions[0].reasoning_types == ["basic"]
     assert documents[0].source_uri == "dsid_1"
     assert documents[0].title == "Multipart upload PR"
+
+
+def test_enterprise_adapter_uses_manifest_source_uri_with_relative_corpus_dir(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    corpus = Path("relative_corpus")
+    (corpus / "github").mkdir(parents=True)
+    (corpus / "github" / "dsid_1.txt").write_text("body", encoding="utf-8")
+    questions = Path("questions.jsonl")
+    questions.write_text(json.dumps({"question_id": "qst_1", "question": "q?"}) + "\n", encoding="utf-8")
+    manifest = Path("documents_manifest.json")
+    manifest.write_text(
+        json.dumps(
+            {
+                "github/dsid_1.txt": {
+                    "id": "dsid_1",
+                    "source_uri": "manifest-source-uri",
+                    "title": "Manifest title",
+                    "source_type": "github",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    cfg = AppConfig(
+        benchmark=BenchmarkConfig(
+            kind=BenchmarkKind.ENTERPRISE_RAG_BENCH,
+            mode=BenchmarkMode.SMOKE,
+            enterprise_rag_bench={
+                "corpus_dir": str(corpus),
+                "questions_path": str(questions),
+                "documents_manifest": str(manifest),
+            },
+        ),
+        dataset=DatasetConfig(strategy=DatasetStrategy.CREATE_NEW),
+    )
+
+    documents = list(EnterpriseRAGBenchAdapter(cfg).iter_documents())
+
+    assert documents[0].source_uri == "manifest-source-uri"
+    assert documents[0].title == "Manifest title"
+
+
+def test_enterprise_adapter_file_uri_fallback_allows_relative_corpus_dir(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    corpus = Path("relative_corpus")
+    corpus.mkdir()
+    (corpus / "doc.txt").write_text("body", encoding="utf-8")
+    questions = Path("questions.jsonl")
+    questions.write_text(json.dumps({"question_id": "qst_1", "question": "q?"}) + "\n", encoding="utf-8")
+    cfg = AppConfig(
+        benchmark=BenchmarkConfig(
+            kind=BenchmarkKind.ENTERPRISE_RAG_BENCH,
+            mode=BenchmarkMode.SMOKE,
+            enterprise_rag_bench={"corpus_dir": str(corpus), "questions_path": str(questions)},
+        ),
+        dataset=DatasetConfig(strategy=DatasetStrategy.CREATE_NEW),
+    )
+
+    documents = list(EnterpriseRAGBenchAdapter(cfg).iter_documents())
+
+    assert documents[0].source_uri == (tmp_path / "relative_corpus" / "doc.txt").as_uri()
+
+
+def test_enterprise_adapter_load_questions_handles_array_fields(tmp_path):
+    questions = tmp_path / "questions.parquet"
+    pd.DataFrame(
+        [
+            {
+                "question_id": "qst_1",
+                "question": "q?",
+                "expected_sources": np.array(["source_1"]),
+                "expected_doc_ids": np.array(["ignored_lower_precedence"]),
+                "reasoning_types": np.array(["multi_hop"]),
+                "gold_answer": "a",
+            }
+        ]
+    ).to_parquet(questions)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    cfg = AppConfig(
+        benchmark=BenchmarkConfig(
+            kind=BenchmarkKind.ENTERPRISE_RAG_BENCH,
+            mode=BenchmarkMode.SMOKE,
+            enterprise_rag_bench={"corpus_dir": str(corpus), "questions_path": str(questions)},
+        ),
+        dataset=DatasetConfig(strategy=DatasetStrategy.CREATE_NEW),
+    )
+
+    loaded = EnterpriseRAGBenchAdapter(cfg).load_questions()
+
+    assert loaded[0].expected_sources == ["source_1"]
+    assert loaded[0].reasoning_types == ["multi_hop"]
 
 
 def test_prepare_eragb_handles_array_expected_sources(tmp_path, monkeypatch):

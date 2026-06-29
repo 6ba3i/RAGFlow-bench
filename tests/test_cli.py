@@ -300,6 +300,16 @@ def test_retry_failed_reruns_failed_ids_and_merges_in_place(tmp_path, monkeypatc
 
     monkeypatch.setattr(cli, "RagflowClient", lambda connection: object())
     monkeypatch.setattr(cli, "run_benchmark", fake_run_benchmark)
+    (run_dir / "judge_results.jsonl").write_text(
+        '{"question_id":"1","judge_exclusion_reason":null}\n{"question_id":"5","judge_exclusion_reason":"judge_error"}\n',
+        encoding="utf-8",
+    )
+
+    def fake_auto_judge_run_dir(run_dir, resume=True, force_question_ids=None):
+        observed.update({"judge_run_dir": Path(run_dir), "judge_resume": resume, "force_question_ids": force_question_ids})
+        return {"judge_model": "glm-4.7-flash"}
+
+    monkeypatch.setattr(cli, "_auto_judge_run_dir", fake_auto_judge_run_dir)
 
     cli.retry_failed(run_dir=str(run_dir))
 
@@ -317,6 +327,183 @@ def test_retry_failed_reruns_failed_ids_and_merges_in_place(tmp_path, monkeypatc
     report = json.loads(retry_reports[0].read_text(encoding="utf-8"))
     assert report["remaining_errors"] == 1
     assert report["successful_retries"] == 2
+    assert observed["judge_run_dir"] == run_dir
+    assert observed["judge_resume"] is True
+    assert observed["force_question_ids"] == {"2", "3", "4", "5"}
+    assert report["judge_retry_rows_selected"] == 4
+
+
+def test_auto_judge_run_dir_uses_saved_run_dir_artifacts(tmp_path, monkeypatch):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "results.jsonl").write_text('{"question_id":"1","question":"Q","gold_answer":"A","ragflow_answer":"A"}\n', encoding="utf-8")
+    (run_dir / "config.resolved.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "benchmark": {"kind": "custom", "mode": "smoke", "custom": {"questions_path": "tests/test_cli.py"}},
+                "ragflow": {"api_key": "***REDACTED***", "llm_id": None},
+                "judge": {"api_key": "***REDACTED***", "model": "glm-4-flash"},
+                "dataset": {"strategy": "reuse_existing_dataset", "dataset_id": "ds1"},
+                "output": {"output_dir": str(run_dir)},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    observed = {}
+
+    class _FakeCliJudgeClient:
+        def __init__(self, settings):
+            observed["judge_api_key"] = settings.api_key
+            observed["judge_model"] = settings.model
+            self.model = settings.resolved_model()
+
+    def fake_judge_results_file(*, results_path, client, output_path=None, resume=True, force_question_ids=None, progress_callback=None):
+        observed["results_path"] = Path(results_path)
+        observed["output_path"] = Path(output_path)
+        observed["resume"] = resume
+        observed["force_question_ids"] = force_question_ids
+        observed["progress_callback"] = progress_callback
+        return {"judge_model": client.model}
+
+    monkeypatch.setattr(cli, "ZhipuJudgeClient", _FakeCliJudgeClient)
+    monkeypatch.setattr(cli, "judge_results_file", fake_judge_results_file)
+
+    cli._auto_judge_run_dir(run_dir)
+
+    assert observed["results_path"] == run_dir / "results.jsonl"
+    assert observed["output_path"] == run_dir / "judge_results.jsonl"
+    assert observed["resume"] is True
+    assert observed["force_question_ids"] is None
+    assert observed["progress_callback"] is not None
+    assert observed["judge_api_key"] is None
+    assert observed["judge_model"] == "glm-4-flash"
+
+
+def test_auto_judge_run_dir_requires_results_file(tmp_path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "config.resolved.yaml").write_text("benchmark:\n  kind: custom\ndataset:\n  strategy: reuse_existing_dataset\n  dataset_id: ds1\n", encoding="utf-8")
+
+    with pytest.raises(FileNotFoundError, match="Missing results file"):
+        cli._auto_judge_run_dir(run_dir)
+
+
+def test_run_auto_judges_completed_output_dir(tmp_path, monkeypatch):
+    config_path = tmp_path / "run.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "benchmark": {"kind": "custom", "mode": "smoke", "custom": {"corpus_dir": ".", "questions_path": "tests/test_cli.py"}},
+                "dataset": {"strategy": "reuse_existing_dataset", "dataset_id": "ds1"},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    run_dir = tmp_path / "outputs" / "run1"
+    observed = {}
+
+    monkeypatch.setattr(cli, "run_benchmark", lambda cfg, client, progress_callback=None: run_dir)
+    monkeypatch.setattr(cli, "RagflowClient", lambda connection: object())
+    monkeypatch.setattr(cli, "_auto_judge_run_dir", lambda path, resume=True: observed.update({"path": Path(path), "resume": resume}) or {"judge_model": "glm-4.7-flash"})
+
+    cli.run(config=str(config_path))
+
+    assert observed["path"] == run_dir
+    assert observed["resume"] is True
+
+
+def test_wizard_auto_judges_completed_output_dir(tmp_path, monkeypatch):
+    target = tmp_path / "wizard.yaml"
+    target.write_text(
+        yaml.safe_dump(
+            {
+                "benchmark": {"kind": "custom", "mode": "smoke", "custom": {"corpus_dir": ".", "questions_path": "tests/test_cli.py"}},
+                "dataset": {"strategy": "reuse_existing_dataset", "dataset_id": "ds1"},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    run_dir = tmp_path / "outputs" / "wizard1"
+    observed = {}
+
+    monkeypatch.setattr(cli, "run_wizard", lambda: (target, True))
+    monkeypatch.setattr(cli, "run_benchmark", lambda cfg, client, progress_callback=None: run_dir)
+    monkeypatch.setattr(cli, "RagflowClient", lambda connection: object())
+    monkeypatch.setattr(cli, "_auto_judge_run_dir", lambda path, resume=True: observed.update({"path": Path(path), "resume": resume}) or {"judge_model": "glm-4.7-flash"})
+
+    cli.wizard()
+
+    assert observed["path"] == run_dir
+    assert observed["resume"] is True
+
+
+def test_run_does_not_auto_judge_when_benchmark_fails(tmp_path, monkeypatch):
+    config_path = tmp_path / "run.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "benchmark": {"kind": "custom", "mode": "smoke", "custom": {"corpus_dir": ".", "questions_path": "tests/test_cli.py"}},
+                "dataset": {"strategy": "reuse_existing_dataset", "dataset_id": "ds1"},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    called = {"judge": False}
+
+    def fail_run_benchmark(cfg, client, progress_callback=None):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(cli, "run_benchmark", fail_run_benchmark)
+    monkeypatch.setattr(cli, "RagflowClient", lambda connection: object())
+    monkeypatch.setattr(cli, "_auto_judge_run_dir", lambda path, resume=True: called.update({"judge": True}))
+
+    with pytest.raises(RuntimeError, match="boom"):
+        cli.run(config=str(config_path))
+
+    assert called["judge"] is False
+
+
+def test_retry_failed_includes_existing_judge_errors_without_rerunning_question(tmp_path, monkeypatch):
+    run_dir = _write_run_dir(tmp_path)
+    cli.write_jsonl(
+        run_dir / "judge_results.jsonl",
+        [
+            {"question_id": "1", "judge_exclusion_reason": "judge_error"},
+            {"question_id": "2", "judge_exclusion_reason": None},
+        ],
+    )
+    observed = {}
+
+    def fake_run_benchmark(cfg, client, question_ids=None, progress_callback=None):
+        retry_dir = Path(cfg.output.output_dir)
+        retry_dir.mkdir(parents=True)
+        cli.write_jsonl(
+            retry_dir / "results.jsonl",
+            [
+                _minimal_row("2", answer="A2"),
+                _minimal_row("3", answer="A3"),
+                _minimal_row("4", answer="A4"),
+            ],
+        )
+        return retry_dir
+
+    def fake_auto_judge_run_dir(run_dir, resume=True, force_question_ids=None):
+        observed.update({"resume": resume, "force_question_ids": force_question_ids})
+        return {"judge_model": "glm-4.7-flash"}
+
+    monkeypatch.setattr(cli, "RagflowClient", lambda connection: object())
+    monkeypatch.setattr(cli, "run_benchmark", fake_run_benchmark)
+    monkeypatch.setattr(cli, "_auto_judge_run_dir", fake_auto_judge_run_dir)
+
+    cli.retry_failed(run_dir=str(run_dir))
+
+    assert observed["resume"] is True
+    assert observed["force_question_ids"] == {"1", "2", "3", "4"}
 
 
 def test_retry_failed_no_failed_rows_does_not_rewrite(tmp_path, capsys):
