@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import math
 import os
+import random
 import re
 import time
 import urllib.error
@@ -41,6 +43,8 @@ def prepare_eragb_artifacts(
     merge_max_docs: int = 100,
     filter_questions_with_missing_docs: bool = False,
     include_only_question_docs: bool = False,
+    distractor_multiplier: float = 1.0,
+    distractor_seed: int = 13,
     reference_granularity: ReferenceGranularity | None = None,
     progress_callback: ProgressCallback | None = None,
 ) -> dict[str, Any]:
@@ -53,6 +57,11 @@ def prepare_eragb_artifacts(
         raise ValueError("reference_granularity must be one of: document, shard, none")
     if reference_granularity == "shard" and not merge_documents:
         raise ValueError("reference_granularity='shard' requires merge_documents=True")
+    distractor_multiplier = float(distractor_multiplier)
+    if distractor_multiplier < 1.0:
+        raise ValueError("distractor_multiplier must be >= 1.0")
+    if distractor_multiplier > 1.0 and not include_only_question_docs:
+        raise ValueError("distractor_multiplier > 1.0 requires include_only_question_docs=True")
     merge_target_bytes = max(1, int(merge_target_bytes))
     merge_max_docs = max(1, int(merge_max_docs))
 
@@ -100,9 +109,22 @@ def prepare_eragb_artifacts(
     document_count_before_question_filter = int(len(documents_df))
     available_doc_ids_before_filter = _document_id_set(documents_df)
     question_doc_filter_missing_count = len(required_doc_id_set - available_doc_ids_before_filter)
+    distractor_available_count = max(0, document_count_before_question_filter - len(available_doc_ids_before_filter & required_doc_id_set))
+    target_document_count = int(len(documents_df))
+    distractor_doc_count = 0
     if include_only_question_docs:
-        documents_df = _filter_documents_by_doc_ids(documents_df, required_doc_id_set)
-    document_count_after_question_filter = int(len(documents_df))
+        target_document_count = math.ceil(len(required_doc_ids) * distractor_multiplier)
+        question_documents_df = _filter_documents_by_doc_ids(documents_df, required_doc_id_set)
+        document_count_after_question_filter = int(len(question_documents_df))
+        documents_df, distractor_doc_count, distractor_available_count = _add_random_distractors(
+            documents_df,
+            required_doc_ids=required_doc_id_set,
+            target_document_count=target_document_count,
+            seed=distractor_seed,
+        )
+    else:
+        document_count_after_question_filter = int(len(documents_df))
+    document_count_after_distractors = int(len(documents_df))
     if document_limit is not None:
         documents_df = documents_df.head(max(0, document_limit))
     emit_progress(progress_callback, {"command": "prepare-eragb", "step": "read_parquet", "status": "ok", "count": int(len(documents_df)), "total": int(len(questions_df))})
@@ -166,9 +188,15 @@ def prepare_eragb_artifacts(
         "question_count": len(normalized_questions),
         "question_count_dropped_missing_docs": dropped_missing,
         "include_only_question_docs": include_only_question_docs,
+        "distractor_multiplier": distractor_multiplier,
+        "distractor_seed": distractor_seed,
         "required_doc_count": len(required_doc_ids),
+        "target_document_count": target_document_count,
+        "distractor_doc_count": distractor_doc_count,
+        "distractor_available_count": distractor_available_count,
         "document_count_before_question_filter": document_count_before_question_filter,
         "document_count_after_question_filter": document_count_after_question_filter,
+        "document_count_after_distractors": document_count_after_distractors,
         "question_doc_filter_missing_count": question_doc_filter_missing_count,
         "reference_granularity": reference_granularity,
         "merge_documents": merge_documents,
@@ -488,6 +516,30 @@ def _filter_documents_by_doc_ids(df: pd.DataFrame, required_doc_ids: set[str]) -
         if _document_id_from_row(row, idx) in required_doc_ids
     ]
     return pd.DataFrame(rows, columns=df.columns)
+
+
+def _add_random_distractors(
+    df: pd.DataFrame,
+    *,
+    required_doc_ids: set[str],
+    target_document_count: int,
+    seed: int,
+) -> tuple[pd.DataFrame, int, int]:
+    if target_document_count <= 0:
+        return df.head(0), 0, 0
+    records = df.to_dict(orient="records")
+    available_doc_ids = {_document_id_from_row(row, idx) for idx, row in enumerate(records)}
+    present_required_doc_ids = available_doc_ids & required_doc_ids
+    distractor_candidates = _dedupe_preserve_order(
+        _document_id_from_row(row, idx)
+        for idx, row in enumerate(records)
+        if _document_id_from_row(row, idx) not in required_doc_ids
+    )
+    distractor_available_count = len(distractor_candidates)
+    distractor_needed = max(0, target_document_count - len(present_required_doc_ids))
+    sampled_distractors = set(random.Random(seed).sample(distractor_candidates, min(distractor_needed, distractor_available_count)))
+    selected_doc_ids = present_required_doc_ids | sampled_distractors
+    return _filter_documents_by_doc_ids(df, selected_doc_ids), len(sampled_distractors), distractor_available_count
 
 
 def _first_present_value(row: dict[str, Any], keys: tuple[str, ...]) -> Any:

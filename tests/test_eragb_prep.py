@@ -192,6 +192,115 @@ def test_prepare_eragb_include_only_question_docs_applies_document_limit_after_f
     assert report["question_doc_filter_missing_count"] == 0
 
 
+def test_prepare_eragb_distractor_multiplier_adds_seeded_random_non_required_docs(tmp_path, monkeypatch):
+    raw_docs = tmp_path / "eragb" / "raw" / "documents"
+    raw_questions = tmp_path / "eragb" / "raw" / "questions"
+    raw_docs.mkdir(parents=True)
+    raw_questions.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {"doc_id": "required_a", "source_type": "github", "title": "A", "content": "a"},
+            {"doc_id": "required_b", "source_type": "github", "title": "B", "content": "b"},
+            *[
+                {"doc_id": f"distractor_{idx}", "source_type": "slack", "title": str(idx), "content": str(idx)}
+                for idx in range(10)
+            ],
+        ]
+    ).to_parquet(raw_docs / "test.parquet")
+    pd.DataFrame(
+        [
+            {
+                "question_id": "qst_1",
+                "question": "a and b?",
+                "expected_doc_ids": ["required_a", "required_b"],
+                "gold_answer": "a b",
+            }
+        ]
+    ).to_parquet(raw_questions / "test.parquet")
+    monkeypatch.setattr(
+        "ragflow_bench.benchmarks.eragb_prep.hf_hub_download",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("should reuse existing parquet")),
+    )
+
+    report = prepare_eragb_artifacts(
+        output_dir=tmp_path / "eragb",
+        include_only_question_docs=True,
+        distractor_multiplier=5,
+        distractor_seed=123,
+    )
+
+    manifest = json.loads((tmp_path / "eragb" / "documents_manifest.json").read_text(encoding="utf-8"))
+    prepared_ids = {entry["id"] for entry in manifest.values()}
+    assert {"required_a", "required_b"} <= prepared_ids
+    assert len(prepared_ids) == 10
+    assert len(prepared_ids - {"required_a", "required_b"}) == 8
+    assert report["required_doc_count"] == 2
+    assert report["target_document_count"] == 10
+    assert report["distractor_doc_count"] == 8
+    assert report["distractor_available_count"] == 10
+    assert report["document_count_after_question_filter"] == 2
+    assert report["document_count_after_distractors"] == 10
+    assert report["document_count"] == 10
+
+
+def test_prepare_eragb_distractor_seed_is_deterministic(tmp_path, monkeypatch):
+    for output_name in ("eragb_a", "eragb_b"):
+        raw_docs = tmp_path / output_name / "raw" / "documents"
+        raw_questions = tmp_path / output_name / "raw" / "questions"
+        raw_docs.mkdir(parents=True)
+        raw_questions.mkdir(parents=True)
+        pd.DataFrame(
+            [
+                {"doc_id": "required", "source_type": "github", "title": "R", "content": "r"},
+                *[
+                    {"doc_id": f"distractor_{idx}", "source_type": "slack", "title": str(idx), "content": str(idx)}
+                    for idx in range(20)
+                ],
+            ]
+        ).to_parquet(raw_docs / "test.parquet")
+        pd.DataFrame([{"question_id": "qst_1", "question": "r?", "expected_doc_ids": ["required"], "gold_answer": "r"}]).to_parquet(raw_questions / "test.parquet")
+    monkeypatch.setattr(
+        "ragflow_bench.benchmarks.eragb_prep.hf_hub_download",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("should reuse existing parquet")),
+    )
+
+    for output_name in ("eragb_a", "eragb_b"):
+        prepare_eragb_artifacts(
+            output_dir=tmp_path / output_name,
+            include_only_question_docs=True,
+            distractor_multiplier=6,
+            distractor_seed=99,
+        )
+
+    def prepared_ids(output_name: str) -> list[str]:
+        manifest = json.loads((tmp_path / output_name / "documents_manifest.json").read_text(encoding="utf-8"))
+        return sorted(entry["id"] for entry in manifest.values())
+
+    assert prepared_ids("eragb_a") == prepared_ids("eragb_b")
+
+
+def test_prepare_eragb_rejects_distractor_multiplier_without_question_doc_filter(tmp_path):
+    with pytest.raises(ValueError) as exc_info:
+        prepare_eragb_artifacts(
+            output_dir=tmp_path / "eragb",
+            include_only_question_docs=False,
+            distractor_multiplier=2,
+        )
+
+    assert "requires include_only_question_docs=True" in str(exc_info.value)
+
+
+def test_prepare_eragb_rejects_distractor_multiplier_below_one(tmp_path):
+    with pytest.raises(ValueError) as exc_info:
+        prepare_eragb_artifacts(
+            output_dir=tmp_path / "eragb",
+            include_only_question_docs=True,
+            distractor_multiplier=0.5,
+        )
+
+    assert "must be >= 1.0" in str(exc_info.value)
+
+
 def test_enterprise_adapter_reads_onyx_and_manifest_relative_paths(tmp_path):
     corpus = tmp_path / "corpus"
     (corpus / "github").mkdir(parents=True)

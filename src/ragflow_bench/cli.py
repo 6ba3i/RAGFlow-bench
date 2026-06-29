@@ -186,6 +186,8 @@ def prepare_eragb(
     merge_max_docs: int = typer.Option(100, help="Maximum embedded documents per shard when merging documents"),
     filter_questions_with_missing_docs: bool = typer.Option(False, help="Drop questions whose expected docs are not present in the prepared corpus"),
     include_only_question_docs: bool = typer.Option(False, help="Prepare only documents referenced by the selected ERAGB questions"),
+    distractor_multiplier: float = typer.Option(1.0, help="When preparing only question docs, add random distractors until total docs ~= required docs times this multiplier"),
+    distractor_seed: int = typer.Option(13, help="Deterministic seed for ERAGB distractor sampling"),
     reference_granularity: str | None = typer.Option(None, help="Expected-source granularity: document, shard, or none. Defaults to shard in merged mode, document otherwise."),
 ) -> None:
     try:
@@ -201,6 +203,8 @@ def prepare_eragb(
             merge_max_docs=merge_max_docs,
             filter_questions_with_missing_docs=filter_questions_with_missing_docs,
             include_only_question_docs=include_only_question_docs,
+            distractor_multiplier=distractor_multiplier,
+            distractor_seed=distractor_seed,
             reference_granularity=reference_granularity,
             progress_callback=default_progress_printer,
         )
